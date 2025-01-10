@@ -1474,9 +1474,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.20"
+version = "0.23.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5065c3f250cbd332cd894be57c40fa52387247659b14a2d6041d121547903b1b"
+checksum = "8f287924602bf649d949c63dc8ac8b235fa5387d394020705b80c4eb597ce5b8"
 dependencies = [
  "once_cell",
  "ring",
@@ -1960,9 +1960,10 @@ dependencies = [
 [[package]]
 name = "tokio-process-tools"
 version = "0.1.0"
-source = "git+https://github.com/lpotthast/tokio-process-tools?branch=main#65d68ae0181baf0c23bac2b2cb73f23af6ee1ca9"
+source = "git+https://github.com/lpotthast/tokio-process-tools?branch=main#204fd44c1bdeefd1f50b2dfbc073f1c76ccf1ff5"
 dependencies = [
  "nix",
+ "thiserror 2.0.10",
  "tokio",
  "tracing",
  "windows-sys 0.59.0",

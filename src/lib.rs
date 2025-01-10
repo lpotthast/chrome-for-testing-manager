@@ -358,11 +358,11 @@ impl ChromeForTestingManager {
         let chromedriver_process =
             ProcessHandle::new_from_child_with_piped_io("chromedriver", chromedriver_process);
 
-        let _inspector = chromedriver_process.stdout().inspect_async(move |a| {
-            Box::pin(async move {
-                tracing::debug!("{:?}", a);
-                Ok(())
-            })
+        let _out_inspector = chromedriver_process.stdout().inspect(|stdout_line| {
+            tracing::debug!(stdout_line, "chromedriver log");
+        });
+        let _err_inspector = chromedriver_process.stdout().inspect(|stderr_line| {
+            tracing::debug!(stderr_line, "chromedriver log");
         });
 
         tracing::info!("Waiting for chromedriver to start...");

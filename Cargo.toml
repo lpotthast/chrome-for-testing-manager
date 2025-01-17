@@ -2,7 +2,7 @@
 name = "chrome-for-testing-manager"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.76.0"
+rust-version = "1.81.0"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
 description = """
 Programmatic management of chrome-for-testing installations.

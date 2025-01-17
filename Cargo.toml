@@ -19,7 +19,7 @@ thirtyfour = ["dep:thirtyfour"]
 [dependencies]
 anyhow = "1.0.95"
 chrome-for-testing = "0.1.0"
-directories = "5.0.1"
+directories = "6.0.0"
 reqwest = "0.12.12"
 thirtyfour = { version = "0.35.0", optional = true }
 tokio = { version = "1", features = ["fs", "process"] }
@@ -31,5 +31,7 @@ zip-extensions = "0.8.1"
 assertr = "0.1.0"
 chrome-for-testing-manager = { path = ".", features = ["thirtyfour"] }
 # ^.. This is a somewhat hacky way to say: Please enable the "thirtyfour" features for all tests.
+ctor = "0.2.9"
+serial_test = "3.2.0"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3.19"

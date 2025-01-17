@@ -29,7 +29,7 @@ pub enum VersionRequest {
 
     /// Use the latest release from the given [chrome_for_testing::channel::Channel],
     /// e.g. the one from the [chrome_for_testing::channel::Channel::Stable] channel.
-    LatestIn(chrome_for_testing::api::channel::Channel),
+    LatestIn(Channel),
 
     /// Pin a specific version to use.
     Fixed(Version),
@@ -443,11 +443,16 @@ mod tests {
     use crate::{ChromeForTestingManager, Port, PortRequest, VersionRequest};
     use assertr::prelude::*;
     use chrome_for_testing::api::channel::Channel;
+    use serial_test::serial;
+
+    #[ctor::ctor]
+    fn init_test_tracing() {
+        tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn clear_cache_and_download_new() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let mgr = ChromeForTestingManager::new();
         mgr.clear_cache().await?;
         let selected = mgr
@@ -463,9 +468,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn resolve_and_download_latest() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let mgr = ChromeForTestingManager::new();
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
@@ -478,9 +482,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn resolve_and_download_latest_in_stable_channel() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let mgr = ChromeForTestingManager::new();
         let selected = mgr
             .resolve_version(VersionRequest::LatestIn(Channel::Stable))
@@ -495,9 +498,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn launch_chromedriver_on_specific_port() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let mgr = ChromeForTestingManager::new();
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
@@ -509,10 +511,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn download_and_launch_chromedriver_on_random_port_and_prepare_thirtyfour_webdriver(
     ) -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let mgr = ChromeForTestingManager::new();
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;

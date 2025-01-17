@@ -2,16 +2,15 @@
 
 Programmatic management of **chrome-for-testing** installations.
 
-### Example (`thirtyfour` feature enabled)
+## Example (`thirtyfour` feature enabled)
 
 ```rust
 use crate::{ChromeForTestingManager, Port, PortRequest, VersionRequest};
 use chrome_for_testing::api::channel::Channel;
 use thirtyfour::prelude::*;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn download_and_launch_chromedriver_on_random_port_and_prepare_thirtyfour_webdriver(
-) -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let mgr = ChromeForTestingManager::new();

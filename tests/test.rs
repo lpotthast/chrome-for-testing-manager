@@ -3,7 +3,8 @@ use thirtyfour::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let driver = ChromeForTestingManager::latest_stable().await?;
+    let chromedriver = ChromeForTestingManager::latest_stable().await?;
+    let driver = chromedriver.new_webdriver().await?;
 
     // Navigate to https://wikipedia.org.
     driver.goto("https://wikipedia.org").await?;

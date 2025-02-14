@@ -11,13 +11,16 @@ use thirtyfour::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let driver = ChromeForTestingManager::latest_stable().await?;
+    let chromedriver = ChromeForTestingManager::latest_stable().await?;
+    let driver = chromedriver.new_webdriver().await?;
     
     driver.goto("https://www.google.com").await?;
 
     let url = driver.current_url().await?;
     assert_that(url).has_display_value("https://www.google.com/");
 
+    driver.quit().await?;
+    
     Ok(())
 }
 ```

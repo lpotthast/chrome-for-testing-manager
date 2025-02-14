@@ -4,9 +4,11 @@ use chrome_for_testing::api::platform::Platform;
 use chrome_for_testing::api::version::Version;
 use chrome_for_testing::api::{Download, HasVersion};
 use std::fmt::{Display, Formatter};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
+use thirtyfour::error::WebDriverResult;
 use tokio::fs;
 use tokio::process::Command;
 use tokio_process_tools::{ProcessHandle, TerminateOnDrop};
@@ -19,6 +21,7 @@ pub mod prelude {
     pub use crate::Port;
     pub use crate::PortRequest;
     pub use crate::SelectedVersion;
+    pub use crate::SpawnedChromedriver;
     pub use crate::VersionRequest;
     pub use chrome_for_testing::api::channel::Channel;
     pub use chrome_for_testing::api::platform::Platform;
@@ -128,6 +131,68 @@ impl Default for ChromeForTestingManager {
     }
 }
 
+/// A wrapper struct for a spawned chromedriver process.
+/// Keep this alive until your test is complete.
+pub struct SpawnedChromedriver {
+    #[expect(unused)]
+    chromedriver: TerminateOnDrop,
+    chromedriver_port: Port,
+    loaded: LoadedChromePackage,
+    mgr: ChromeForTestingManager,
+}
+
+/// This `thirtyfour::WebDriver` wrapper enforces a keep-alive of the `SpawnedChromedriver` from
+/// which this webdriver was created, by storing its lifetime.
+#[cfg(feature = "thirtyfour")]
+pub struct WebDriver<'a> {
+    driver: thirtyfour::WebDriver,
+
+    phantom: std::marker::PhantomData<&'a ()>,
+}
+
+#[cfg(feature = "thirtyfour")]
+impl<'a> WebDriver<'a> {
+    pub async fn quit(self) -> WebDriverResult<()> {
+        self.driver.quit().await
+    }
+}
+
+#[cfg(feature = "thirtyfour")]
+impl Deref for WebDriver<'_> {
+    type Target = thirtyfour::WebDriver;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
+impl SpawnedChromedriver {
+    #[cfg(feature = "thirtyfour")]
+    pub async fn new_webdriver(&self) -> anyhow::Result<WebDriver<'_>> {
+        self.new_webdriver_with_caps(|_caps| Ok(())).await
+    }
+
+    #[cfg(feature = "thirtyfour")]
+    pub async fn new_webdriver_with_caps(
+        &self,
+        setup: impl Fn(
+            &mut thirtyfour::ChromeCapabilities,
+        ) -> Result<(), thirtyfour::prelude::WebDriverError>,
+    ) -> anyhow::Result<WebDriver<'_>> {
+        let mut caps = self.mgr.prepare_caps(&self.loaded).await?;
+        setup(&mut caps).context("Failed to setup chrome capabilities.")?;
+        let driver = thirtyfour::WebDriver::new(
+            format!("http://localhost:{}", self.chromedriver_port),
+            caps,
+        )
+        .await?;
+        Ok(WebDriver {
+            driver,
+            phantom: std::marker::PhantomData,
+        })
+    }
+}
+
 impl ChromeForTestingManager {
     pub fn new() -> Self {
         Self {
@@ -138,35 +203,20 @@ impl ChromeForTestingManager {
     }
 
     #[cfg(feature = "thirtyfour")]
-    pub async fn latest_stable() -> anyhow::Result<thirtyfour::WebDriver> {
+    pub async fn latest_stable() -> anyhow::Result<SpawnedChromedriver> {
         let mgr = ChromeForTestingManager::new();
         let selected = mgr
             .resolve_version(VersionRequest::LatestIn(Channel::Stable))
             .await?;
         let loaded = mgr.download(selected).await?;
-        let (_chromedriver, port) = mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
-        let caps = mgr.prepare_caps(&loaded).await?;
-        let driver = thirtyfour::WebDriver::new(format!("http://localhost:{port}"), caps).await?;
-        Ok(driver)
-    }
-
-    #[cfg(feature = "thirtyfour")]
-    pub async fn latest_stable_with_caps(
-        setup: impl Fn(
-            &mut thirtyfour::ChromeCapabilities,
-        ) -> Result<(), thirtyfour::prelude::WebDriverError>,
-    ) -> anyhow::Result<thirtyfour::WebDriver> {
-        let mgr = ChromeForTestingManager::new();
-        let selected = mgr
-            .resolve_version(VersionRequest::LatestIn(Channel::Stable))
-            .await?;
-        let loaded = mgr.download(selected).await?;
-        let (_chromedriver, port) = mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
-        let mut chrome_caps = mgr.prepare_caps(&loaded).await?;
-        setup(&mut chrome_caps).context("Failed to setup chrome capabilities.")?;
-        let driver =
-            thirtyfour::WebDriver::new(format!("http://localhost:{port}"), chrome_caps).await?;
-        Ok(driver)
+        let (chromedriver, chromedriver_port) =
+            mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
+        Ok(SpawnedChromedriver {
+            chromedriver,
+            chromedriver_port,
+            loaded,
+            mgr,
+        })
     }
 
     fn version_dir(&self, version: Version) -> PathBuf {
@@ -480,6 +530,7 @@ mod tests {
     use assertr::prelude::*;
     use chrome_for_testing::api::channel::Channel;
     use serial_test::serial;
+    use thirtyfour::ChromiumLikeCapabilities;
 
     #[ctor::ctor]
     fn init_test_tracing() {
@@ -561,6 +612,44 @@ mod tests {
 
         let url = driver.current_url().await?;
         assert_that(url).has_display_value("https://www.google.com/");
+
+        driver.quit().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
+    #[cfg(feature = "thirtyfour")]
+    async fn latest_stable() -> anyhow::Result<()> {
+        let chromedriver = ChromeForTestingManager::latest_stable().await?;
+        let driver = chromedriver.new_webdriver().await?;
+
+        driver.goto("https://www.google.com").await?;
+
+        let url = driver.current_url().await?;
+        assert_that(url).has_display_value("https://www.google.com/");
+
+        driver.quit().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
+    #[cfg(feature = "thirtyfour")]
+    async fn latest_stable_with_caps() -> anyhow::Result<()> {
+        let chromedriver = ChromeForTestingManager::latest_stable().await?;
+        let driver = chromedriver
+            .new_webdriver_with_caps(|caps| caps.unset_headless())
+            .await?;
+
+        driver.goto("https://www.google.com").await?;
+
+        let url = driver.current_url().await?;
+        assert_that(url).has_display_value("https://www.google.com/");
+
+        driver.quit().await?;
 
         Ok(())
     }

@@ -4,11 +4,9 @@ use chrome_for_testing::api::platform::Platform;
 use chrome_for_testing::api::version::Version;
 use chrome_for_testing::api::{Download, HasVersion};
 use std::fmt::{Display, Formatter};
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
-use thirtyfour::error::WebDriverResult;
 use tokio::fs;
 use tokio::process::Command;
 use tokio_process_tools::{ProcessHandle, TerminateOnDrop};
@@ -21,11 +19,13 @@ pub mod prelude {
     pub use crate::Port;
     pub use crate::PortRequest;
     pub use crate::SelectedVersion;
-    pub use crate::SpawnedChromedriver;
     pub use crate::VersionRequest;
     pub use chrome_for_testing::api::channel::Channel;
     pub use chrome_for_testing::api::platform::Platform;
     pub use chrome_for_testing::api::version::Version;
+
+    #[cfg(feature = "thirtyfour")]
+    pub use crate::SpawnedChromedriver;
 }
 
 #[derive(Debug)]
@@ -133,6 +133,7 @@ impl Default for ChromeForTestingManager {
 
 /// A wrapper struct for a spawned chromedriver process.
 /// Keep this alive until your test is complete.
+#[cfg(feature = "thirtyfour")]
 pub struct SpawnedChromedriver {
     #[expect(unused)]
     chromedriver: TerminateOnDrop,
@@ -152,13 +153,13 @@ pub struct WebDriver<'a> {
 
 #[cfg(feature = "thirtyfour")]
 impl<'a> WebDriver<'a> {
-    pub async fn quit(self) -> WebDriverResult<()> {
+    pub async fn quit(self) -> thirtyfour::prelude::WebDriverResult<()> {
         self.driver.quit().await
     }
 }
 
 #[cfg(feature = "thirtyfour")]
-impl Deref for WebDriver<'_> {
+impl std::ops::Deref for WebDriver<'_> {
     type Target = thirtyfour::WebDriver;
 
     fn deref(&self) -> &Self::Target {
@@ -166,13 +167,12 @@ impl Deref for WebDriver<'_> {
     }
 }
 
+#[cfg(feature = "thirtyfour")]
 impl SpawnedChromedriver {
-    #[cfg(feature = "thirtyfour")]
     pub async fn new_webdriver(&self) -> anyhow::Result<WebDriver<'_>> {
         self.new_webdriver_with_caps(|_caps| Ok(())).await
     }
 
-    #[cfg(feature = "thirtyfour")]
     pub async fn new_webdriver_with_caps(
         &self,
         setup: impl Fn(

@@ -11,9 +11,19 @@ use tokio::fs;
 use tokio::process::Command;
 use tokio_process_tools::{ProcessHandle, TerminateOnDrop};
 
-pub use chrome_for_testing;
-
 mod download;
+
+pub mod prelude {
+    pub use crate::ChromeForTestingManager;
+    pub use crate::LoadedChromePackage;
+    pub use crate::Port;
+    pub use crate::PortRequest;
+    pub use crate::SelectedVersion;
+    pub use crate::VersionRequest;
+    pub use chrome_for_testing::api::channel::Channel;
+    pub use chrome_for_testing::api::platform::Platform;
+    pub use chrome_for_testing::api::version::Version;
+}
 
 #[derive(Debug)]
 pub(crate) enum Artifact {
@@ -125,6 +135,38 @@ impl ChromeForTestingManager {
             cache_dir: CacheDir::get_or_create(),
             platform: Platform::detect(),
         }
+    }
+
+    #[cfg(feature = "thirtyfour")]
+    pub async fn latest_stable() -> anyhow::Result<thirtyfour::WebDriver> {
+        let mgr = ChromeForTestingManager::new();
+        let selected = mgr
+            .resolve_version(VersionRequest::LatestIn(Channel::Stable))
+            .await?;
+        let loaded = mgr.download(selected).await?;
+        let (_chromedriver, port) = mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
+        let caps = mgr.prepare_caps(&loaded).await?;
+        let driver = thirtyfour::WebDriver::new(format!("http://localhost:{port}"), caps).await?;
+        Ok(driver)
+    }
+
+    #[cfg(feature = "thirtyfour")]
+    pub async fn latest_stable_with_caps(
+        setup: impl Fn(
+            &mut thirtyfour::ChromeCapabilities,
+        ) -> Result<(), thirtyfour::prelude::WebDriverError>,
+    ) -> anyhow::Result<thirtyfour::WebDriver> {
+        let mgr = ChromeForTestingManager::new();
+        let selected = mgr
+            .resolve_version(VersionRequest::LatestIn(Channel::Stable))
+            .await?;
+        let loaded = mgr.download(selected).await?;
+        let (_chromedriver, port) = mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
+        let mut chrome_caps = mgr.prepare_caps(&loaded).await?;
+        setup(&mut chrome_caps).context("Failed to setup chrome capabilities.")?;
+        let driver =
+            thirtyfour::WebDriver::new(format!("http://localhost:{port}"), chrome_caps).await?;
+        Ok(driver)
     }
 
     fn version_dir(&self, version: Version) -> PathBuf {
@@ -349,14 +391,8 @@ impl ChromeForTestingManager {
 
         self.apply_chromedriver_creation_flags(&mut command);
 
-        let chromedriver_process = command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("Failed to launch chromedriver.")?;
-
-        let chromedriver_process =
-            ProcessHandle::new_from_child_with_piped_io("chromedriver", chromedriver_process);
+        let chromedriver_process = ProcessHandle::spawn("chromedriver", command)
+            .context("Failed to spawn chromedriver process.")?;
 
         let _out_inspector = chromedriver_process.stdout().inspect(|stdout_line| {
             tracing::debug!(stdout_line, "chromedriver log");
@@ -394,8 +430,8 @@ impl ChromeForTestingManager {
 
         Ok((
             chromedriver_process.terminate_on_drop(
-                Some(std::time::Duration::from_secs(10)),
-                Some(std::time::Duration::from_secs(10)),
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(10),
             ),
             Port(Arc::into_inner(started_on_port).unwrap().into_inner()),
         ))

@@ -1,14 +1,15 @@
+use assertr::prelude::*;
 use chrome_for_testing_manager::prelude::*;
 use thirtyfour::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let chromedriver = ChromeForTestingManager::latest_stable().await?;
-    let driver = chromedriver.new_webdriver().await?;
+    let mut chromedriver = Chromedriver::run_latest_stable().await?;
+    let (handle, session) = chromedriver.new_session().await?;
 
     // Navigate to https://wikipedia.org.
-    driver.goto("https://wikipedia.org").await?;
-    let elem_form = driver.find(By::Id("search-form")).await?;
+    session.goto("https://wikipedia.org").await?;
+    let elem_form = session.find(By::Id("search-form")).await?;
 
     // Find element from element.
     let elem_text = elem_form.find(By::Id("searchInput")).await?;
@@ -21,11 +22,11 @@ async fn main() -> anyhow::Result<()> {
     elem_button.click().await?;
 
     // Look for header to implicitly wait for the page to load.
-    driver.find(By::ClassName("firstHeading")).await?;
-    assert_eq!(driver.title().await?, "Selenium - Wikipedia");
+    session.find(By::ClassName("firstHeading")).await?;
+    assert_that(session.title().await?).is_equal_to("Selenium - Wikipedia");
 
-    // Always explicitly close the browser.
-    driver.quit().await?;
+    // Always explicitly close the session/browser.
+    chromedriver.quit(handle).await?;
 
     Ok(())
 }

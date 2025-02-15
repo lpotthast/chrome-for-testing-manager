@@ -1,4 +1,4 @@
-use crate::Artifact;
+use crate::mgr::Artifact;
 use anyhow::Context;
 use std::fs;
 use std::path::Path;
@@ -33,7 +33,7 @@ pub(crate) async fn download_zip(
         .context("Failed to open new file to write downloaded zip into.")?;
 
     // Perform the download.
-    write_file(&mut file, response, ).await?;
+    write_file(&mut file, response).await?;
     tracing::info!("Completed {artifact_type:?} download");
 
     // TODO: validate download?

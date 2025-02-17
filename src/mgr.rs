@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::process::Command;
-use tokio_process_tools::{ProcessHandle, TerminateOnDrop};
+use tokio_process_tools::ProcessHandle;
 
 #[derive(Debug)]
 pub(crate) enum Artifact {
@@ -85,7 +85,6 @@ impl From<(VersionInChannel, Platform)> for SelectedVersion {
 
 #[derive(Debug)]
 pub struct LoadedChromePackage {
-    #[expect(unused)]
     pub chrome_executable: PathBuf,
     pub chromedriver_executable: PathBuf,
 }
@@ -286,7 +285,7 @@ impl ChromeForTestingManager {
         &self,
         loaded: &LoadedChromePackage,
         port: PortRequest,
-    ) -> Result<(TerminateOnDrop, Port), anyhow::Error> {
+    ) -> Result<(ProcessHandle, Port), anyhow::Error> {
         let chromedriver_exe_path_str = loaded
             .chromedriver_executable
             .to_str()
@@ -346,10 +345,7 @@ impl ChromeForTestingManager {
             .await?;
 
         Ok((
-            chromedriver_process.terminate_on_drop(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(10),
-            ),
+            chromedriver_process,
             Port(Arc::into_inner(started_on_port).unwrap().into_inner()),
         ))
     }

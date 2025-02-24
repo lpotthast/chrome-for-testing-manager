@@ -19,7 +19,7 @@ Frees you from the need to
 ```toml
 [dependencies]
 thirtyfour = "0.35"
-chrome-for-testing-manager = { version = "0.4", features = ["thirtyfour"] }
+chrome-for-testing-manager = { version = "0.5", features = ["thirtyfour"] }
 
 # Additional dependencies for the example below.
 assertr = "0.1"

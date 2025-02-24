@@ -27,7 +27,7 @@ mod tests {
         tracing_subscriber::fmt().with_test_writer().try_init().ok();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     #[serial]
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable() -> anyhow::Result<()> {
@@ -42,10 +42,12 @@ mod tests {
             })
             .await?;
 
+        chromedriver.terminate().await?;
+
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     #[serial]
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable_with_caps() -> anyhow::Result<()> {
@@ -62,6 +64,8 @@ mod tests {
                 },
             )
             .await?;
+
+        chromedriver.terminate().await?;
 
         Ok(())
     }

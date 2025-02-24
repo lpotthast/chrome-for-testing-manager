@@ -10,7 +10,6 @@ pub mod prelude {
     pub use crate::mgr::ChromeForTestingManager;
     pub use crate::mgr::VersionRequest;
     pub use crate::session::Session;
-    pub use crate::session::SessionHandle;
     pub use chrome_for_testing::api::channel::Channel;
     pub use chrome_for_testing::api::version::Version;
 }
@@ -31,7 +30,7 @@ mod tests {
     #[serial]
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable() -> anyhow::Result<()> {
-        let mut chromedriver = Chromedriver::run_latest_stable().await?;
+        let chromedriver = Chromedriver::run_latest_stable().await?;
 
         chromedriver
             .with_session(async |session| {
@@ -51,7 +50,7 @@ mod tests {
     #[serial]
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable_with_caps() -> anyhow::Result<()> {
-        let mut chromedriver = Chromedriver::run_latest_stable().await?;
+        let chromedriver = Chromedriver::run_latest_stable().await?;
 
         chromedriver
             .with_custom_session(

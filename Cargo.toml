@@ -25,7 +25,7 @@ thirtyfour = { version = "0.35.0", optional = true }
 tokio = { version = "1", features = ["fs", "process"] }
 tokio-process-tools = "0.4.0"
 tracing = "0.1.41"
-uuid = { version = "1.13.1", features = ["v7"] }
+futures = "0.3.31"
 zip-extensions = "0.8.1"
 
 [dev-dependencies]

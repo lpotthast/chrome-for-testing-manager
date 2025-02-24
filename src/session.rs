@@ -36,8 +36,3 @@ impl std::ops::Deref for Session {
         &self.driver
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SessionHandle {
-    pub(crate) session_id: uuid::Uuid,
-}

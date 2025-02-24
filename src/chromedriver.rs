@@ -1,9 +1,6 @@
 use crate::mgr::{ChromeForTestingManager, LoadedChromePackage, VersionRequest};
 use crate::port::{Port, PortRequest};
-use crate::prelude::{Session, SessionHandle};
-use crate::session::SessionError;
 use chrome_for_testing::api::channel::Channel;
-use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio_process_tools::{ProcessHandle, TerminationError};
@@ -29,18 +26,16 @@ pub struct Chromedriver {
     /// The port the chromedriver process listens on.
     #[allow(unused)]
     pub(crate) chromedriver_port: Port,
-
-    /// List of browser sessions created.
-    /// Session ownership must never leave this struct to enforce that `chromedriver` will
-    /// outlive all sessions.
-    pub(crate) sessions: HashMap<SessionHandle, Session>,
 }
 
 impl Drop for Chromedriver {
     fn drop(&mut self) {
         if self.chromedriver_process.is_some() {
             let backtrace = std::backtrace::Backtrace::capture();
-            tracing::error!(?backtrace, "Leaking non-terminated chromedriver process. Call `chromedriver.terminate()` to terminate it gracefully!");
+            tracing::error!(
+                ?backtrace,
+                "Leaking non-terminated chromedriver process. Call `chromedriver.terminate()` to terminate it gracefully!"
+            );
         }
     }
 }
@@ -57,7 +52,6 @@ impl Chromedriver {
             chromedriver_port,
             loaded,
             mgr,
-            sessions: Default::default(),
         })
     }
 
@@ -83,12 +77,22 @@ impl Chromedriver {
     }
 
     #[cfg(feature = "thirtyfour")]
-    async fn new_session_with_caps(
-        &mut self,
+    pub async fn with_session(
+        &self,
+        f: impl AsyncFnOnce(&crate::session::Session) -> Result<(), crate::session::SessionError>,
+    ) -> anyhow::Result<()> {
+        self.with_custom_session(|_caps| Ok(()), f).await
+    }
+
+    #[cfg(feature = "thirtyfour")]
+    pub async fn with_custom_session(
+        &self,
         setup: impl Fn(
             &mut thirtyfour::ChromeCapabilities,
         ) -> Result<(), thirtyfour::prelude::WebDriverError>,
-    ) -> anyhow::Result<(SessionHandle, &Session)> {
+        f: impl AsyncFnOnce(&crate::session::Session) -> Result<(), crate::session::SessionError>,
+    ) -> anyhow::Result<()> {
+        use crate::session::Session;
         use anyhow::Context;
 
         let mut caps = self.mgr.prepare_caps(&self.loaded).await?;
@@ -99,54 +103,11 @@ impl Chromedriver {
         )
         .await?;
 
-        let handle = SessionHandle {
-            session_id: uuid::Uuid::now_v7(),
-        };
-        self.sessions.insert(handle, Session { driver });
-
-        Ok((handle, self.sessions.get(&handle).expect("present")))
-    }
-
-    #[cfg(feature = "thirtyfour")]
-    pub async fn with_session(
-        &mut self,
-        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError>,
-    ) -> anyhow::Result<()> {
-        self.with_custom_session(|_caps| Ok(()), f).await
-    }
-
-    #[cfg(feature = "thirtyfour")]
-    pub async fn with_custom_session(
-        &mut self,
-        setup: impl Fn(
-            &mut thirtyfour::ChromeCapabilities,
-        ) -> Result<(), thirtyfour::prelude::WebDriverError>,
-        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError>,
-    ) -> anyhow::Result<()> {
-        let (handle, _) = self.new_session_with_caps(setup).await?;
-
-        let session = self.sessions.remove(&handle).expect("present");
+        let session = Session { driver };
 
         let result = f(&session).await;
 
         session.quit().await?;
         result.map_err(Into::into)
-    }
-
-    pub fn expect_session(&self, handle: &SessionHandle) -> &Session {
-        self.get_session(handle).expect("present")
-    }
-
-    pub fn get_session(&self, handle: &SessionHandle) -> Option<&Session> {
-        self.sessions.get(handle)
-    }
-
-    pub async fn quit(&mut self, handle: SessionHandle) -> Result<(), SessionError> {
-        let session = self.sessions.remove(&handle);
-        if session.is_none() {
-            return Ok(());
-        }
-        let session = session.unwrap();
-        session.quit().await
     }
 }

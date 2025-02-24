@@ -3,10 +3,10 @@ use chrome_for_testing_manager::prelude::*;
 use thirtyfour::prelude::*;
 
 #[tokio::test]
-async fn main() -> anyhow::Result<()> {
+async fn single_session() -> anyhow::Result<()> {
     tracing_subscriber::fmt().try_init().ok();
 
-    let mut chromedriver = Chromedriver::run_latest_stable().await?;
+    let chromedriver = Chromedriver::run_latest_stable().await?;
 
     chromedriver
         .with_session(async |session| {
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
             // Look for header to implicitly wait for the page to load.
             session.find(By::ClassName("firstHeading")).await?;
             assert_that(session.title().await?).is_equal_to("Selenium - Wikipedia");
-            
+
             Ok(())
         })
         .await?;

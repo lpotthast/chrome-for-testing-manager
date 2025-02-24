@@ -60,6 +60,8 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     }).await?;
 
+    chromedriver.terminate().await?;
+  
     Ok(())
 }
 ```

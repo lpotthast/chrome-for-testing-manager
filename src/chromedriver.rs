@@ -4,7 +4,6 @@ use crate::prelude::{Session, SessionHandle};
 use crate::session::SessionError;
 use chrome_for_testing::api::channel::Channel;
 use std::collections::HashMap;
-use std::future::Future;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio_process_tools::{ProcessHandle, TerminationError};
@@ -84,12 +83,7 @@ impl Chromedriver {
     }
 
     #[cfg(feature = "thirtyfour")]
-    pub async fn new_session(&mut self) -> anyhow::Result<(SessionHandle, &Session)> {
-        self.new_session_with_caps(|_caps| Ok(())).await
-    }
-
-    #[cfg(feature = "thirtyfour")]
-    pub async fn new_session_with_caps(
+    async fn new_session_with_caps(
         &mut self,
         setup: impl Fn(
             &mut thirtyfour::ChromeCapabilities,
@@ -114,22 +108,29 @@ impl Chromedriver {
     }
 
     #[cfg(feature = "thirtyfour")]
-    pub async fn with_session<F, Fut>(&mut self, f: F) -> anyhow::Result<()>
-    where
-        F: FnOnce(Session) -> Fut,
-        Fut: Future<Output = Result<Session, SessionError>>,
-    {
-        let (handle, _) = self.new_session_with_caps(|_caps| Ok(())).await?;
+    pub async fn with_session(
+        &mut self,
+        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError>,
+    ) -> anyhow::Result<()> {
+        self.with_custom_session(|_caps| Ok(()), f).await
+    }
+
+    #[cfg(feature = "thirtyfour")]
+    pub async fn with_custom_session(
+        &mut self,
+        setup: impl Fn(
+            &mut thirtyfour::ChromeCapabilities,
+        ) -> Result<(), thirtyfour::prelude::WebDriverError>,
+        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError>,
+    ) -> anyhow::Result<()> {
+        let (handle, _) = self.new_session_with_caps(setup).await?;
 
         let session = self.sessions.remove(&handle).expect("present");
 
-        match f(session).await {
-            Ok(session) => {
-                session.quit().await?;
-                Ok(())
-            }
-            Err(err) => Err(err.into()),
-        }
+        let result = f(&session).await;
+
+        session.quit().await?;
+        result.map_err(Into::into)
     }
 
     pub fn expect_session(&self, handle: &SessionHandle) -> &Session {

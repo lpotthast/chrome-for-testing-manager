@@ -32,14 +32,15 @@ mod tests {
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable() -> anyhow::Result<()> {
         let mut chromedriver = Chromedriver::run_latest_stable().await?;
-        let (handle, session) = chromedriver.new_session().await?;
 
-        session.goto("https://www.google.com").await?;
-
-        let url = session.current_url().await?;
-        assert_that(url).has_display_value("https://www.google.com/");
-
-        chromedriver.quit(handle).await?;
+        chromedriver
+            .with_session(async |session| {
+                session.goto("https://www.google.com").await?;
+                let url = session.current_url().await?;
+                assert_that(url).has_display_value("https://www.google.com/");
+                Ok(())
+            })
+            .await?;
 
         Ok(())
     }
@@ -49,16 +50,18 @@ mod tests {
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable_with_caps() -> anyhow::Result<()> {
         let mut chromedriver = Chromedriver::run_latest_stable().await?;
-        let (handle, session) = chromedriver
-            .new_session_with_caps(|caps| caps.unset_headless())
+
+        chromedriver
+            .with_custom_session(
+                |caps| caps.unset_headless(),
+                async |session| {
+                    session.goto("https://www.google.com").await?;
+                    let url = session.current_url().await?;
+                    assert_that(url).has_display_value("https://www.google.com/");
+                    Ok(())
+                },
+            )
             .await?;
-
-        session.goto("https://www.google.com").await?;
-
-        let url = session.current_url().await?;
-        assert_that(url).has_display_value("https://www.google.com/");
-
-        chromedriver.quit(handle).await?;
 
         Ok(())
     }

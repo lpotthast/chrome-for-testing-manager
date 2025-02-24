@@ -63,3 +63,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+## MSRV
+
+- Starting from version `0.5.0`, the minimum supported rust version is `1.85.0`
+- Starting from version `0.1.0`, the minimum supported rust version is `1.81.0`

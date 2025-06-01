@@ -9,11 +9,12 @@ use chrome_for_testing::api::platform::Platform;
 use chrome_for_testing::api::version::Version;
 use chrome_for_testing::api::{Download, HasVersion};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU16;
 use tokio::fs;
 use tokio::process::Command;
-use tokio_process_tools::ProcessHandle;
+use tokio_process_tools::broadcast::BroadcastOutputStream;
+use tokio_process_tools::{LineParsingOptions, Next, ProcessHandle};
 
 #[derive(Debug)]
 pub(crate) enum Artifact {
@@ -85,6 +86,7 @@ impl From<(VersionInChannel, Platform)> for SelectedVersion {
 
 #[derive(Debug)]
 pub struct LoadedChromePackage {
+    #[allow(unused)] // used in tests!
     pub chrome_executable: PathBuf,
     pub chromedriver_executable: PathBuf,
 }
@@ -185,7 +187,7 @@ impl ChromeForTestingManager {
                 return Err(anyhow::anyhow!(
                     "No chrome download found for selection {selected:?} using platform {}",
                     self.platform
-                ))
+                ));
             }
         };
 
@@ -195,7 +197,7 @@ impl ChromeForTestingManager {
                 return Err(anyhow::anyhow!(
                     "No chromedriver download found for {selected:?} using platform {}",
                     self.platform
-                ))
+                ));
             }
         };
 
@@ -285,7 +287,7 @@ impl ChromeForTestingManager {
         &self,
         loaded: &LoadedChromePackage,
         port: PortRequest,
-    ) -> Result<(ProcessHandle, Port), anyhow::Error> {
+    ) -> Result<(ProcessHandle<BroadcastOutputStream>, Port), anyhow::Error> {
         let chromedriver_exe_path_str = loaded
             .chromedriver_executable
             .to_str()
@@ -307,22 +309,31 @@ impl ChromeForTestingManager {
 
         self.apply_chromedriver_creation_flags(&mut command);
 
-        let chromedriver_process = ProcessHandle::spawn("chromedriver", command)
-            .context("Failed to spawn chromedriver process.")?;
+        let chromedriver_process =
+            ProcessHandle::<BroadcastOutputStream>::spawn("chromedriver", command)
+                .context("Failed to spawn chromedriver process.")?;
 
-        let _out_inspector = chromedriver_process.stdout().inspect(|stdout_line| {
-            tracing::debug!(stdout_line, "chromedriver log");
-        });
-        let _err_inspector = chromedriver_process.stdout().inspect(|stderr_line| {
-            tracing::debug!(stderr_line, "chromedriver log");
-        });
+        let _out_inspector = chromedriver_process.stdout().inspect_lines(
+            |stdout_line| {
+                tracing::debug!(stdout_line, "chromedriver log");
+                Next::Continue
+            },
+            LineParsingOptions::default(),
+        );
+        let _err_inspector = chromedriver_process.stdout().inspect_lines(
+            |stderr_line| {
+                tracing::debug!(stderr_line, "chromedriver log");
+                Next::Continue
+            },
+            LineParsingOptions::default(),
+        );
 
         tracing::info!("Waiting for chromedriver to start...");
         let started_on_port = Arc::new(AtomicU16::new(0));
         let started_on_port_clone = started_on_port.clone();
         chromedriver_process
             .stdout()
-            .wait_for_with_timeout(
+            .wait_for_line_with_timeout(
                 move |line| {
                     if line.contains("started successfully on port") {
                         let port = line
@@ -340,6 +351,7 @@ impl ChromeForTestingManager {
                         false
                     }
                 },
+                LineParsingOptions::default(),
                 std::time::Duration::from_secs(10),
             )
             .await?;

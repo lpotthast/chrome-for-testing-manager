@@ -3,6 +3,7 @@ use crate::port::{Port, PortRequest};
 use chrome_for_testing::api::channel::Channel;
 use std::process::ExitStatus;
 use std::time::Duration;
+use tokio_process_tools::broadcast::BroadcastOutputStream;
 use tokio_process_tools::{ProcessHandle, TerminationError};
 
 /// A wrapper struct for a spawned chromedriver process.
@@ -21,7 +22,7 @@ pub struct Chromedriver {
     ///
     /// Always stores a process handle. The value is only taken out on termination,
     /// notifying our `Drop` impl that the process was gracefully terminated when seeing `None`.
-    pub(crate) chromedriver_process: Option<ProcessHandle>,
+    pub(crate) chromedriver_process: Option<ProcessHandle<BroadcastOutputStream>>,
 
     /// The port the chromedriver process listens on.
     #[allow(unused)]

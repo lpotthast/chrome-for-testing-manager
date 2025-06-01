@@ -309,7 +309,7 @@ impl ChromeForTestingManager {
 
         self.apply_chromedriver_creation_flags(&mut command);
 
-        let chromedriver_process =
+        let mut chromedriver_process =
             ProcessHandle::<BroadcastOutputStream>::spawn("chromedriver", command)
                 .context("Failed to spawn chromedriver process.")?;
 
@@ -355,6 +355,11 @@ impl ChromeForTestingManager {
                 std::time::Duration::from_secs(10),
             )
             .await?;
+
+        // It SHOULD definitely be terminated.
+        // But the default implementation when "must_be_terminated" raises a panic if not terminated.
+        // Our custom `Drop` impl on `Chromedriver` relaxes this and only logs an ERROR instead.
+        chromedriver_process.must_not_be_terminated();
 
         Ok((
             chromedriver_process,

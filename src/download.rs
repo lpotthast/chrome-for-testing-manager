@@ -58,7 +58,7 @@ async fn write_file(
     mut response: reqwest::Response,
 ) -> anyhow::Result<()> {
     if let Some(content_length) = response.content_length() {
-        tracing::info!("Content-Length: {}", content_length);
+        tracing::info!("Content-Length: {content_length} ({content_length_mb:.2} MB)", content_length_mb = content_length as f64 / (1024.0 * 1024.0));
     }
 
     // TODO: Take note when download seems to hang (chunk() waiting for too long) and log such events.

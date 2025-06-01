@@ -36,7 +36,6 @@ async fn multiple_sessions() -> anyhow::Result<()> {
                         submit_btn.click().await.unwrap();
 
                         // Look for heading to implicitly wait for the page to load.
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         let _heading = session.find(By::Id("firstHeading")).await.unwrap();
 
                         assert_that(session.title().await.unwrap())

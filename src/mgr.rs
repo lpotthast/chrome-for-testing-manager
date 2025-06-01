@@ -330,7 +330,7 @@ impl ChromeForTestingManager {
                             .trim_matches('"')
                             .trim_end_matches('.')
                             .split(' ')
-                            .last()
+                            .next_back()
                             .expect("port as segment after last space")
                             .parse::<u16>()
                             .expect("port to be a u16");

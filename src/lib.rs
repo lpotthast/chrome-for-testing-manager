@@ -19,6 +19,7 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use crate::session::SessionError;
     use assertr::prelude::*;
     use serial_test::serial;
     use thirtyfour::ChromiumLikeCapabilities;
@@ -32,19 +33,10 @@ mod tests {
     #[serial]
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable() -> anyhow::Result<()> {
-        let chromedriver = Chromedriver::run_latest_stable().await?;
-
-        chromedriver
-            .with_session(async |session| {
-                session.goto("https://www.google.com").await?;
-                let url = session.current_url().await?;
-                assert_that(url).has_display_value("https://www.google.com/");
-                Ok(())
-            })
-            .await?;
-
+        // NOTE: Using beta channel as stable channel chromedriver was bugged on Linux...
+        let chromedriver = Chromedriver::run_latest_beta().await?;
+        chromedriver.with_session(test_google).await?;
         chromedriver.terminate().await?;
-
         Ok(())
     }
 
@@ -52,22 +44,19 @@ mod tests {
     #[serial]
     #[cfg(feature = "thirtyfour")]
     async fn latest_stable_with_caps() -> anyhow::Result<()> {
-        let chromedriver = Chromedriver::run_latest_stable().await?;
-
+        // NOTE: Using beta channel as stable channel chromedriver was bugged on Linux...
+        let chromedriver = Chromedriver::run_latest_beta().await?;
         chromedriver
-            .with_custom_session(
-                |caps| caps.unset_headless(),
-                async |session| {
-                    session.goto("https://www.google.com").await?;
-                    let url = session.current_url().await?;
-                    assert_that(url).has_display_value("https://www.google.com/");
-                    Ok(())
-                },
-            )
+            .with_custom_session(|caps| caps.unset_headless(), test_google)
             .await?;
-
         chromedriver.terminate().await?;
+        Ok(())
+    }
 
+    async fn test_google(session: &Session) -> Result<(), SessionError> {
+        session.goto("https://www.google.com").await?;
+        let url = session.current_url().await?;
+        assert_that(url).has_display_value("https://www.google.com/");
         Ok(())
     }
 }

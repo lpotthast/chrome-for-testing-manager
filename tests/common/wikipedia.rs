@@ -10,7 +10,6 @@ pub async fn test_wikipedia(session: &Session) -> Result<(), SessionError> {
     assert_that(url).has_display_value("https://www.wikipedia.org/");
 
     let search_form = session.find(By::Id("search-form")).await?;
-
     let search_input = search_form.find(By::Id("searchInput")).await?;
     search_input.send_keys("selenium").await?;
 
@@ -19,7 +18,7 @@ pub async fn test_wikipedia(session: &Session) -> Result<(), SessionError> {
 
     let _heading = session
         .query(By::Id("firstHeading"))
-        .wait(Duration::from_secs(2), Duration::from_micros(100))
+        .wait(Duration::from_secs(2), Duration::from_millis(100))
         .exists()
         .await?;
 

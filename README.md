@@ -42,22 +42,21 @@ async fn main() -> anyhow::Result<()> {
     Chromedriver::run_latest_stable()
         .await?
         .with_session(async |session| {
-            // Navigate to https://wikipedia.org.
             session.goto("https://wikipedia.org").await?;
-            let elem_form = session.find(By::Id("search-form")).await?;
+          
+            let search_form = session.find(By::Id("search-form")).await?;
+            let search_input = search_form.find(By::Id("searchInput")).await?;
+            search_input.send_keys("selenium").await?;
 
-            // Find element from element.
-            let elem_text = elem_form.find(By::Id("searchInput")).await?;
-
-            // Type in the search terms.
-            elem_text.send_keys("selenium").await?;
-
-            // Click the search button.
-            let elem_button = elem_form.find(By::Css("button[type='submit']")).await?;
-            elem_button.click().await?;
+            let submit_btn = elem_form.find(By::Css("button[type='submit']")).await?;
+            submit_btn.click().await?;
 
             // Look for header to implicitly wait for the page to load.
-            session.find(By::ClassName("firstHeading")).await?;
+            let _heading = session
+                .query(By::Id("firstHeading"))
+                .wait(Duration::from_secs(2), Duration::from_millis(100))
+                .exists()
+                .await?;
             assert_that(session.title().await?).is_equal_to("Selenium - Wikipedia");
 
             Ok(())

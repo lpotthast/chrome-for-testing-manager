@@ -1,6 +1,6 @@
 [package]
 name = "chrome-for-testing-manager"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85.0"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
@@ -18,20 +18,23 @@ thirtyfour = ["dep:thirtyfour"]
 
 [dependencies]
 anyhow = "1.0.95"
-chrome-for-testing = "0.1.0"
+chrome-for-testing = "0.2.0"
 directories = "6.0.0"
+futures = "0.3.31"
+indoc = "2.0.6"
 reqwest = "0.12.12"
-thirtyfour = { version = "0.35.0", optional = true }
+thirtyfour = { version = "0.36.1", optional = true }
+thiserror = "2.0.16"
 tokio = { version = "1", features = ["fs", "process"] }
 tokio-process-tools = "0.5.4"
 tracing = "0.1.41"
 zip-extensions = "0.8.1"
 
 [dev-dependencies]
-assertr = "0.3.1"
+assertr = "0.4.0"
 chrome-for-testing-manager = { path = ".", features = ["thirtyfour"] }
 # ^.. This is a somewhat hacky way to say: Please enable the "thirtyfour" features for all tests.
-ctor = "0.4.2"
+ctor = "0.5.0"
 serial_test = "3.2.0"
-tokio = { version = "1.45.1", features = ["full"] }
+tokio = { version = "1.45.1", features = ["macros"] }
 tracing-subscriber = "0.3.19"

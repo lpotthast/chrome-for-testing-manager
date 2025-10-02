@@ -3,8 +3,8 @@ use crate::download;
 use crate::port::{Port, PortRequest};
 use anyhow::Context;
 use chrome_for_testing::api::channel::Channel;
-use chrome_for_testing::api::known_good_versions::VersionWithoutChannel;
-use chrome_for_testing::api::last_known_good_versions::VersionInChannel;
+use chrome_for_testing::api::known_good_versions::{KnownGoodVersions, VersionWithoutChannel};
+use chrome_for_testing::api::last_known_good_versions::{LastKnownGoodVersions, VersionInChannel};
 use chrome_for_testing::api::platform::Platform;
 use chrome_for_testing::api::version::Version;
 use chrome_for_testing::api::{Download, HasVersion};
@@ -105,11 +105,12 @@ impl Default for ChromeForTestingManager {
 }
 
 impl ChromeForTestingManager {
+    /// **Panics**: If the current platform is unsupported.
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
             cache_dir: CacheDir::get_or_create(),
-            platform: Platform::detect(),
+            platform: Platform::detect().expect("Supported platform"),
         }
     }
 
@@ -127,44 +128,46 @@ impl ChromeForTestingManager {
     ) -> Result<SelectedVersion, anyhow::Error> {
         let selected = match version_selection {
             VersionRequest::Latest => {
-                fn get_latest<T: HasVersion + Clone>(options: &[T]) -> Option<T> {
-                    if options.is_empty() {
-                        return None;
-                    }
-
-                    let mut latest: &T = &options[0];
-
-                    for option in &options[1..] {
-                        if option.version() > latest.version() {
-                            latest = option;
+                fn get_latest_with_chromedriver(
+                    options: &[VersionWithoutChannel],
+                ) -> Option<VersionWithoutChannel> {
+                    let mut found: Option<&VersionWithoutChannel> = None;
+                    for option in options {
+                        // Only consider options providing a ChromeDriver binary.
+                        // We could never operate without it.
+                        if option.downloads.chromedriver.is_some() {
+                            if found.is_none() {
+                                found = Some(option);
+                            } else {
+                                let last = found.expect("present");
+                                if option.version() > last.version() {
+                                    found = Some(option);
+                                }
+                            }
                         }
                     }
-
-                    Some(latest.clone())
+                    found.cloned()
                 }
 
-                let all =
-                    chrome_for_testing::api::known_good_versions::request(self.client.clone())
-                        .await
-                        .context("Failed to request latest versions.")?;
-                // TODO: Search for latest version with both chrome and chromedriver available!
-                get_latest(&all.versions).map(|v| SelectedVersion::from((v, self.platform)))
+                let all = KnownGoodVersions::fetch(self.client.clone())
+                    .await
+                    .context("Failed to request latest versions.")?;
+                get_latest_with_chromedriver(&all.versions)
+                    .map(|v| SelectedVersion::from((v, self.platform)))
             }
             VersionRequest::LatestIn(channel) => {
-                let all =
-                    chrome_for_testing::api::last_known_good_versions::request(self.client.clone())
-                        .await
-                        .context("Failed to request latest versions.")?;
+                let all = LastKnownGoodVersions::fetch(self.client.clone())
+                    .await
+                    .context("Failed to request latest versions.")?;
                 all.channels
                     .get(&channel)
                     .cloned()
                     .map(|v| SelectedVersion::from((v, self.platform)))
             }
             VersionRequest::Fixed(version) => {
-                let all =
-                    chrome_for_testing::api::known_good_versions::request(self.client.clone())
-                        .await
-                        .context("Failed to request latest versions.")?;
+                let all = KnownGoodVersions::fetch(self.client.clone())
+                    .await
+                    .context("Failed to request latest versions.")?;
                 all.versions
                     .into_iter()
                     .find(|v| v.version == version)
@@ -502,8 +505,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
-    async fn download_and_launch_chromedriver_on_random_port_and_prepare_thirtyfour_webdriver(
-    ) -> anyhow::Result<()> {
+    async fn download_and_launch_chromedriver_on_random_port_and_prepare_thirtyfour_webdriver()
+    -> anyhow::Result<()> {
         let mgr = ChromeForTestingManager::new();
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;

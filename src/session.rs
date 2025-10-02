@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 /// A browser session. Used to control the browser.
 ///
 /// When using `thirtyfour` (feature), this has a `Deref` impl to `thirtyfour::WebDriver`, so this
@@ -8,17 +10,26 @@ pub struct Session {
     pub(crate) driver: thirtyfour::WebDriver,
 }
 
-#[cfg(feature = "thirtyfour")]
-pub type SessionError = thirtyfour::error::WebDriverError;
+#[derive(Debug, Error)]
+pub enum SessionError {
+    #[error("The user code panicked:\n{reason}")]
+    Panic {
+        reason: String
+    },
 
-#[cfg(not(feature = "thirtyfour"))]
-pub type SessionError = anyhow::Error;
+    #[cfg(feature = "thirtyfour")]
+    #[error("thirtyfour WebDriverError")]
+    Thirtyfour {
+        #[from]
+        source: thirtyfour::error::WebDriverError,
+    },
+}
 
 impl Session {
     pub async fn quit(self) -> Result<(), SessionError> {
         #[cfg(feature = "thirtyfour")]
         {
-            self.driver.quit().await
+            self.driver.quit().await.map_err(Into::into)
         }
 
         #[cfg(not(feature = "thirtyfour"))]

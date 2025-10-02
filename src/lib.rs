@@ -12,6 +12,7 @@ pub mod prelude {
     pub use crate::port::Port;
     pub use crate::port::PortRequest;
     pub use crate::session::Session;
+    pub use crate::session::SessionError;
     pub use chrome_for_testing::api::channel::Channel;
     pub use chrome_for_testing::api::version::Version;
 }

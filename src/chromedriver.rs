@@ -1,36 +1,13 @@
 use crate::mgr::{ChromeForTestingManager, LoadedChromePackage, VersionRequest};
 use crate::port::{Port, PortRequest};
-#[cfg(feature = "thirtyfour")]
-use crate::session::{Session, SessionError};
 use anyhow::anyhow;
-use async_dropper::{AsyncDrop, AsyncDropper};
-use async_trait::async_trait;
 use chrome_for_testing::api::channel::Channel;
 use std::fmt::{Debug, Formatter};
-use std::ops::Deref;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::runtime::RuntimeFlavor;
 use tokio_process_tools::broadcast::BroadcastOutputStream;
-use tokio_process_tools::{OutputStream, ProcessHandle, TerminationError};
-
-struct AutoTerminateProcess<T: OutputStream> {
-    process: Option<ProcessHandle<T>>,
-}
-
-impl<T: OutputStream> Default for AutoTerminateProcess<T> {
-    fn default() -> Self {
-        Self { process: None }
-    }
-}
-
-impl<T: OutputStream> Deref for AutoTerminateProcess<T> {
-    type Target = Option<ProcessHandle<T>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.process
-    }
-}
+use tokio_process_tools::{TerminateOnDrop, TerminationError};
 
 /// A wrapper struct for a spawned chromedriver process.
 /// Keep this alive until your test is complete.
@@ -50,7 +27,7 @@ pub struct Chromedriver {
     ///
     /// Always stores a process handle. The value is only taken out on termination,
     /// notifying our `Drop` impl that the process was gracefully terminated when seeing `None`.
-    chromedriver_process: AsyncDropper<AutoTerminateProcess<BroadcastOutputStream>>,
+    chromedriver_process: Option<TerminateOnDrop<BroadcastOutputStream>>,
 
     /// The port the chromedriver process listens on.
     chromedriver_port: Port,
@@ -61,34 +38,9 @@ impl Debug for Chromedriver {
         f.debug_struct("Chromedriver")
             .field("mgr", &self.mgr)
             .field("loaded", &self.loaded)
-            .field("chromedriver_process", &self.chromedriver_process.process)
+            .field("chromedriver_process", &self.chromedriver_process)
             .field("chromedriver_port", &self.chromedriver_port)
             .finish()
-    }
-}
-
-/// Implementation of [AsyncDrop] that specifies the actual behavior
-#[async_trait]
-impl<T: OutputStream + Send + 'static> AsyncDrop for AutoTerminateProcess<T> {
-    async fn async_drop(&mut self) {
-        if let Some(mut process) = self.process.take() {
-            tracing::debug!("Terminating chromedriver...");
-            let interrupt_timeout = Duration::from_secs(3);
-            let terminate_timeout = Duration::from_secs(3);
-            match process
-                .terminate(interrupt_timeout, terminate_timeout)
-                .await
-            {
-                Ok(exit_status) => {
-                    tracing::info!(
-                        "Chromedriver terminated successfully. exit_status: {exit_status}"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!("Chromedriver could not be terminated: {err:?}");
-                }
-            }
-        }
     }
 }
 
@@ -117,9 +69,10 @@ impl Chromedriver {
         let (chromedriver_process, chromedriver_port) =
             mgr.launch_chromedriver(&loaded, port).await?;
         Ok(Chromedriver {
-            chromedriver_process: AsyncDropper::new(AutoTerminateProcess {
-                process: Some(chromedriver_process),
-            }),
+            chromedriver_process: Some(
+                chromedriver_process
+                    .terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3)),
+            ),
             chromedriver_port,
             loaded,
             mgr,
@@ -153,7 +106,6 @@ impl Chromedriver {
         terminate_timeout: Duration,
     ) -> Result<ExitStatus, TerminationError> {
         self.chromedriver_process
-            .process
             .take()
             .expect("present")
             .terminate(interrupt_timeout, terminate_timeout)
@@ -165,7 +117,7 @@ impl Chromedriver {
     #[cfg(feature = "thirtyfour")]
     pub async fn with_session(
         &self,
-        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError>,
+        f: impl AsyncFnOnce(&crate::session::Session) -> Result<(), crate::session::SessionError>,
     ) -> anyhow::Result<()> {
         self.with_custom_session(|_caps| Ok(()), f).await
     }
@@ -181,7 +133,9 @@ impl Chromedriver {
         f: F,
     ) -> anyhow::Result<()>
     where
-        F: for<'a> AsyncFnOnce(&'a Session) -> Result<(), SessionError>,
+        F: for<'a> AsyncFnOnce(
+            &'a crate::session::Session,
+        ) -> Result<(), crate::session::SessionError>,
     {
         use crate::session::Session;
         use anyhow::Context;
@@ -208,7 +162,7 @@ impl Chromedriver {
         // Handle panics.
         let result = maybe_panicked.map_err(|err| {
             let err = anyhow::anyhow!("{err:?}");
-            SessionError::Panic {
+            crate::session::SessionError::Panic {
                 reason: err.to_string(),
             }
         })?;

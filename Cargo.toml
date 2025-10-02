@@ -1,6 +1,6 @@
 [package]
 name = "chrome-for-testing-manager"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85.0"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
@@ -18,8 +18,6 @@ thirtyfour = ["dep:thirtyfour"]
 
 [dependencies]
 anyhow = "1.0.95"
-async-dropper = { version = "0.3.1", features = ["tokio", "simple"] }
-async-trait = "0.1.89"
 chrome-for-testing = "0.2.0"
 directories = "6.0.0"
 futures = "0.3.31"

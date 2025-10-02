@@ -17,22 +17,23 @@ authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
 thirtyfour = ["dep:thirtyfour"]
 
 [dependencies]
-async-dropper = { version = "0.3.1", features = ["tokio", "simple"] }
 anyhow = "1.0.95"
+async-dropper = { version = "0.3.1", features = ["tokio", "simple"] }
+async-trait = "0.1.89"
 chrome-for-testing = "0.2.0"
 directories = "6.0.0"
+futures = "0.3.31"
+indoc = "2.0.6"
 reqwest = "0.12.12"
 thirtyfour = { version = "0.36.1", optional = true }
+thiserror = "2.0.16"
 tokio = { version = "1", features = ["fs", "process"] }
 tokio-process-tools = "0.5.4"
 tracing = "0.1.41"
 zip-extensions = "0.8.1"
-thiserror = "2.0.16"
-futures = "0.3.31"
-async-trait = "0.1.89"
 
 [dev-dependencies]
-assertr = "0.3.9"
+assertr = "0.4.0"
 chrome-for-testing-manager = { path = ".", features = ["thirtyfour"] }
 # ^.. This is a somewhat hacky way to say: Please enable the "thirtyfour" features for all tests.
 ctor = "0.5.0"

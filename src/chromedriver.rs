@@ -6,10 +6,8 @@ use anyhow::anyhow;
 use async_dropper::{AsyncDrop, AsyncDropper};
 use async_trait::async_trait;
 use chrome_for_testing::api::channel::Channel;
-use futures::FutureExt;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
-use std::panic::{AssertUnwindSafe, UnwindSafe};
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::runtime::RuntimeFlavor;
@@ -36,24 +34,26 @@ impl<T: OutputStream> Deref for AutoTerminateProcess<T> {
 
 /// A wrapper struct for a spawned chromedriver process.
 /// Keep this alive until your test is complete.
+///
+/// Automatically terminates the spawned chromedriver process when dropped.
+///
+/// You can always manually call `terminate`, but the on-drop automation makes it much safer in
+/// quickly panicking contexts, such as tests.
 pub struct Chromedriver {
     /// The manager instance used to resolve a version, download it and starting the chromedriver.
-    #[allow(unused)]
-    pub(crate) mgr: ChromeForTestingManager,
+    mgr: ChromeForTestingManager,
 
     /// Chrome and chromedriver binaries used for testing.
-    #[allow(unused)]
-    pub(crate) loaded: LoadedChromePackage,
+    loaded: LoadedChromePackage,
 
     /// The running chromedriver process. Terminated when dropped.
     ///
     /// Always stores a process handle. The value is only taken out on termination,
     /// notifying our `Drop` impl that the process was gracefully terminated when seeing `None`.
-    pub(crate) chromedriver_process: AsyncDropper<AutoTerminateProcess<BroadcastOutputStream>>,
+    chromedriver_process: AsyncDropper<AutoTerminateProcess<BroadcastOutputStream>>,
 
     /// The port the chromedriver process listens on.
-    #[allow(unused)]
-    pub(crate) chromedriver_port: Port,
+    chromedriver_port: Port,
 }
 
 impl Debug for Chromedriver {
@@ -67,47 +67,29 @@ impl Debug for Chromedriver {
     }
 }
 
-//impl Drop for Chromedriver {
-//    fn drop(&mut self) {
-//        if self.chromedriver_process.is_some() {
-//            let backtrace = std::backtrace::Backtrace::capture();
-//            tracing::error!(
-//                ?backtrace,
-//                "Leaking non-terminated chromedriver process. Call `chromedriver.terminate()` to terminate it gracefully!"
-//            );
-//        }
-//    }
-//}
-
 /// Implementation of [AsyncDrop] that specifies the actual behavior
 #[async_trait]
 impl<T: OutputStream + Send + 'static> AsyncDrop for AutoTerminateProcess<T> {
-    // simulated work during async_drop
     async fn async_drop(&mut self) {
-        let interrupt_timeout = Duration::from_secs(3);
-        let terminate_timeout = Duration::from_secs(3);
-
         if let Some(mut process) = self.process.take() {
-            tracing::info!("Terminating chromedriver");
-            let _ = process
+            tracing::debug!("Terminating chromedriver...");
+            let interrupt_timeout = Duration::from_secs(3);
+            let terminate_timeout = Duration::from_secs(3);
+            match process
                 .terminate(interrupt_timeout, terminate_timeout)
-                .await;
-            tracing::info!("chromedriver terminated successfully");
+                .await
+            {
+                Ok(exit_status) => {
+                    tracing::info!(
+                        "Chromedriver terminated successfully. exit_status: {exit_status}"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!("Chromedriver could not be terminated: {err:?}");
+                }
+            }
         }
     }
-
-    //fn drop_timeout(&self) -> Duration {
-    //    Duration::from_secs(7) // extended from default 3 seconds, as an example
-    //}
-
-    // NOTE: the method below is automatically derived for you, but you can override it
-    // make sure that the object is equal to T::default() by the end, otherwise it will panic!
-    // fn reset(&mut self) {
-    //     self.0 = String::default();
-    // }
-
-    // NOTE: below was not implemented since we want the default of DropFailAction::Continue
-    // fn drop_fail_action(&self) -> DropFailAction;
 }
 
 impl Chromedriver {
@@ -118,16 +100,14 @@ impl Chromedriver {
         match tokio::runtime::Handle::current().runtime_flavor() {
             RuntimeFlavor::MultiThread => { /* we want this */ }
             unsupported_flavor => {
-                return Err(anyhow!(
-                    r#"
+                return Err(anyhow!(indoc::formatdoc! {r#"
                     The Chromedriver type requires a multithreaded tokio runtime,
                     as we rely on async-drop functionality not available on a single-threaded runtime.
 
                     Detected runtime flavor: {unsupported_flavor:?}.
-                    
+
                     If you are writing a test, annotate it with `#[tokio::test(flavor = "multi_thread")]`.
-                    "#
-                ));
+                "#}));
             }
         }
 
@@ -185,7 +165,7 @@ impl Chromedriver {
     #[cfg(feature = "thirtyfour")]
     pub async fn with_session(
         &self,
-        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError> + UnwindSafe,
+        f: impl AsyncFnOnce(&Session) -> Result<(), SessionError>,
     ) -> anyhow::Result<()> {
         self.with_custom_session(|_caps| Ok(()), f).await
     }
@@ -201,10 +181,11 @@ impl Chromedriver {
         f: F,
     ) -> anyhow::Result<()>
     where
-        F: for<'a> AsyncFnOnce(&'a Session) -> Result<(), SessionError> + UnwindSafe,
+        F: for<'a> AsyncFnOnce(&'a Session) -> Result<(), SessionError>,
     {
         use crate::session::Session;
         use anyhow::Context;
+        use futures::FutureExt;
 
         let mut caps = self.mgr.prepare_caps(&self.loaded).await?;
         setup(&mut caps).context("Failed to set up chrome capabilities.")?;
@@ -216,8 +197,10 @@ impl Chromedriver {
 
         let session = Session { driver };
 
-        // Execute the user function
-        let maybe_panicked = AssertUnwindSafe(f(&session)).catch_unwind().await;
+        // Execute the user function.
+        let maybe_panicked = core::panic::AssertUnwindSafe(f(&session))
+            .catch_unwind()
+            .await;
 
         // No matter what happened, clean up the session!
         session.quit().await?;

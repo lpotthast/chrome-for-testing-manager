@@ -23,7 +23,7 @@ thirtyfour = "0.35"
 chrome-for-testing-manager = { version = "0.6", features = ["thirtyfour"] }
 
 # Additional dependencies for the example below.
-assertr = "0.1"
+assertr = "0.4"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 ```

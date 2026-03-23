@@ -1,18 +1,13 @@
 mod cache;
-pub mod chromedriver;
+pub(crate) mod chromedriver;
 mod download;
-pub mod mgr;
-pub mod port;
-pub mod session;
+pub(crate) mod mgr;
+pub(crate) mod port;
+pub(crate) mod session;
 
-pub mod prelude {
-    pub use crate::chromedriver::Chromedriver;
-    pub use crate::mgr::ChromeForTestingManager;
-    pub use crate::mgr::VersionRequest;
-    pub use crate::port::Port;
-    pub use crate::port::PortRequest;
-    pub use crate::session::Session;
-    pub use crate::session::SessionError;
-    pub use chrome_for_testing::api::channel::Channel;
-    pub use chrome_for_testing::api::version::Version;
-}
+pub use chrome_for_testing::Channel;
+pub use chrome_for_testing::Version;
+pub use chromedriver::Chromedriver;
+pub use mgr::{ChromeForTestingManager, VersionRequest};
+pub use port::{Port, PortRequest};
+pub use session::{Session, SessionError};

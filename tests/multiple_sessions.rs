@@ -1,5 +1,5 @@
 use assertr::prelude::*;
-use chrome_for_testing_manager::prelude::*;
+use chrome_for_testing_manager::*;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
@@ -24,7 +24,7 @@ async fn multiple_sessions() -> anyhow::Result<()> {
 
     let results = tests.join_all().await;
     for result in results {
-        assert_that(result).is_ok();
+        assert_that!(result).is_ok();
     }
 
     let _exit_status = Arc::try_unwrap(chromedriver)

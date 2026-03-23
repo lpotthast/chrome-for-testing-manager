@@ -19,8 +19,8 @@ Frees you from the need to
 
 ```toml
 [dependencies]
-thirtyfour = "0.35"
-chrome-for-testing-manager = { version = "0.6", features = ["thirtyfour"] }
+thirtyfour = "0.36"
+chrome-for-testing-manager = { version = "0.7", features = ["thirtyfour"] }
 
 # Additional dependencies for the example below.
 assertr = "0.4"
@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use assertr::prelude::*;
-use chrome_for_testing_manager::prelude::*;
+use chrome_for_testing_manager::*;
 use thirtyfour::prelude::*;
 
 // This library requires being used in a multithreaded runtime.
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
             let search_input = search_form.find(By::Id("searchInput")).await?;
             search_input.send_keys("selenium").await?;
 
-            let submit_btn = elem_form.find(By::Css("button[type='submit']")).await?;
+            let submit_btn = search_form.find(By::Css("button[type='submit']")).await?;
             submit_btn.click().await?;
 
             // Look for header to implicitly wait for the page to load.
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
                 .wait(Duration::from_secs(2), Duration::from_millis(100))
                 .exists()
                 .await?;
-            assert_that(session.title().await?).is_equal_to("Selenium - Wikipedia");
+            assert_that!(session.title().await?).is_equal_to("Selenium – Wikipedia");
 
             Ok(())
         }).await
@@ -66,5 +66,6 @@ async fn main() -> anyhow::Result<()> {
 
 ## MSRV
 
+- Starting from version `0.7.0`, the minimum supported rust version is `1.85.1`
 - Starting from version `0.5.0`, the minimum supported rust version is `1.85.0`
 - Starting from version `0.1.0`, the minimum supported rust version is `1.81.0`

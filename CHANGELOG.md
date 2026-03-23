@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-03-23
+
+### Fixed
+
+- Suppress `dead_code` warning for `chrome_executable` field which is only used behind the `thirtyfour` feature gate.
+
 ## [0.7.0] - 2026-03-23
 
 ### Added
@@ -124,7 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
-[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.7.1...HEAD
+
+[0.7.1]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.7.0...0.7.1
 
 [0.7.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.6.0...0.7.0
 

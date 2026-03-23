@@ -87,6 +87,7 @@ impl From<(VersionInChannel, Platform)> for SelectedVersion {
 
 #[derive(Debug)]
 pub struct LoadedChromePackage {
+    #[allow(dead_code)] // Used in `prepare_caps` when the `thirtyfour` feature is enabled.
     chrome_executable: PathBuf,
     chromedriver_executable: PathBuf,
 }

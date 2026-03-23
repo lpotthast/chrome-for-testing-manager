@@ -1,5 +1,5 @@
 use assertr::prelude::*;
-use chrome_for_testing_manager::prelude::*;
+use chrome_for_testing_manager::*;
 use std::time::Duration;
 use thirtyfour::prelude::*;
 
@@ -7,7 +7,7 @@ pub async fn test_wikipedia(session: &Session) -> Result<(), SessionError> {
     session.goto("wikipedia.org").await?;
 
     let url = session.current_url().await?;
-    assert_that(url).has_display_value("https://www.wikipedia.org/");
+    assert_that!(url).has_display_value("https://www.wikipedia.org/");
 
     let search_form = session.find(By::Id("search-form")).await?;
     let search_input = search_form.find(By::Id("searchInput")).await?;
@@ -22,7 +22,7 @@ pub async fn test_wikipedia(session: &Session) -> Result<(), SessionError> {
         .exists()
         .await?;
 
-    assert_that(session.title().await?).is_equal_to("Selenium - Wikipedia");
+    assert_that!(session.title().await?).is_equal_to("Selenium – Wikipedia");
 
     Ok(())
 }

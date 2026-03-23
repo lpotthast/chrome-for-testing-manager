@@ -13,9 +13,7 @@ pub struct Session {
 #[derive(Debug, Error)]
 pub enum SessionError {
     #[error("The user code panicked:\n{reason}")]
-    Panic {
-        reason: String
-    },
+    Panic { reason: String },
 
     #[cfg(feature = "thirtyfour")]
     #[error("thirtyfour WebDriverError")]
@@ -26,6 +24,11 @@ pub enum SessionError {
 }
 
 impl Session {
+    /// Quit the browser session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SessionError`] if the underlying `WebDriver` session cannot be closed.
     pub async fn quit(self) -> Result<(), SessionError> {
         #[cfg(feature = "thirtyfour")]
         {
@@ -34,7 +37,7 @@ impl Session {
 
         #[cfg(not(feature = "thirtyfour"))]
         {
-            unimplemented!()
+            Ok(())
         }
     }
 }

@@ -2,19 +2,17 @@ use crate::cache::CacheDir;
 use crate::download;
 use crate::port::{Port, PortRequest};
 use anyhow::Context;
-use chrome_for_testing::api::channel::Channel;
-use chrome_for_testing::api::known_good_versions::{KnownGoodVersions, VersionWithoutChannel};
-use chrome_for_testing::api::last_known_good_versions::{LastKnownGoodVersions, VersionInChannel};
-use chrome_for_testing::api::platform::Platform;
-use chrome_for_testing::api::version::Version;
-use chrome_for_testing::api::{Download, HasVersion};
+use chrome_for_testing::{
+    Channel, Download, DownloadsByPlatform, KnownGoodVersions, LastKnownGoodVersions, Platform,
+    Version, VersionInChannel, VersionWithoutChannel,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
 use tokio::fs;
 use tokio::process::Command;
 use tokio_process_tools::broadcast::BroadcastOutputStream;
-use tokio_process_tools::{LineParsingOptions, Next, ProcessHandle};
+use tokio_process_tools::{LineParsingOptions, Next, Process, ProcessHandle};
 
 #[derive(Debug)]
 pub(crate) enum Artifact {
@@ -22,14 +20,24 @@ pub(crate) enum Artifact {
     ChromeDriver,
 }
 
+// Note: names are used in `download_zip` to construct local filenames!
+impl std::fmt::Display for Artifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Chrome => f.write_str("chrome"),
+            Self::ChromeDriver => f.write_str("chromedriver"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionRequest {
     /// Uses the latest working version. Might not be stable yet.
-    /// You may want to prefer variant [VersionRequest::LatestIn] instead.
+    /// You may want to prefer variant [`VersionRequest::LatestIn`] instead.
     Latest,
 
-    /// Use the latest release from the given [chrome_for_testing::channel::Channel],
-    /// e.g. the one from the [chrome_for_testing::channel::Channel::Stable] channel.
+    /// Use the latest release from the given [`Channel`],
+    /// e.g. the one from the [`Channel::Stable`] channel.
     LatestIn(Channel),
 
     /// Pin a specific version to use.
@@ -40,24 +48,23 @@ pub enum VersionRequest {
 pub struct SelectedVersion {
     channel: Option<Channel>,
     version: Version,
-    #[expect(unused)]
-    revision: String,
     chrome: Option<Download>,
     chromedriver: Option<Download>,
 }
 
 impl From<(VersionWithoutChannel, Platform)> for SelectedVersion {
     fn from((v, p): (VersionWithoutChannel, Platform)) -> Self {
-        let chrome_download = v.downloads.chrome.iter().find(|d| d.platform == p).cloned();
+        let chrome_download = v.downloads.chrome.for_platform(p).cloned();
         let chromedriver_download = v
             .downloads
             .chromedriver
-            .map(|it| it.iter().find(|d| d.platform == p).unwrap().to_owned());
+            .as_deref()
+            .and_then(|it| it.for_platform(p))
+            .cloned();
 
         SelectedVersion {
             channel: None,
             version: v.version,
-            revision: v.revision,
             chrome: chrome_download,
             chromedriver: chromedriver_download,
         }
@@ -66,18 +73,12 @@ impl From<(VersionWithoutChannel, Platform)> for SelectedVersion {
 
 impl From<(VersionInChannel, Platform)> for SelectedVersion {
     fn from((v, p): (VersionInChannel, Platform)) -> Self {
-        let chrome_download = v.downloads.chrome.iter().find(|d| d.platform == p).cloned();
-        let chromedriver_download = v
-            .downloads
-            .chromedriver
-            .iter()
-            .find(|d| d.platform == p)
-            .cloned();
+        let chrome_download = v.downloads.chrome.for_platform(p).cloned();
+        let chromedriver_download = v.downloads.chromedriver.for_platform(p).cloned();
 
         SelectedVersion {
             channel: Some(v.channel),
             version: v.version,
-            revision: v.revision,
             chrome: chrome_download,
             chromedriver: chromedriver_download,
         }
@@ -86,9 +87,8 @@ impl From<(VersionInChannel, Platform)> for SelectedVersion {
 
 #[derive(Debug)]
 pub struct LoadedChromePackage {
-    #[allow(unused)] // used in tests!
-    pub chrome_executable: PathBuf,
-    pub chromedriver_executable: PathBuf,
+    chrome_executable: PathBuf,
+    chromedriver_executable: PathBuf,
 }
 
 #[derive(Debug)]
@@ -98,26 +98,26 @@ pub struct ChromeForTestingManager {
     platform: Platform,
 }
 
-impl Default for ChromeForTestingManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ChromeForTestingManager {
-    /// **Panics**: If the current platform is unsupported.
-    pub fn new() -> Self {
-        Self {
+    /// # Errors
+    ///
+    /// Returns an error if the current platform is unsupported or the cache directory
+    /// cannot be determined or created.
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
             client: reqwest::Client::new(),
-            cache_dir: CacheDir::get_or_create(),
-            platform: Platform::detect().expect("Supported platform"),
-        }
+            cache_dir: CacheDir::get_or_create()?,
+            platform: Platform::detect().context("Unsupported platform")?,
+        })
     }
 
     fn version_dir(&self, version: Version) -> PathBuf {
         self.cache_dir.path().join(version.to_string())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the cache directory cannot be deleted or re-created.
     pub async fn clear_cache(&self) -> anyhow::Result<()> {
         self.cache_dir.clear().await
     }
@@ -128,44 +128,26 @@ impl ChromeForTestingManager {
     ) -> Result<SelectedVersion, anyhow::Error> {
         let selected = match version_selection {
             VersionRequest::Latest => {
-                fn get_latest_with_chromedriver(
-                    options: &[VersionWithoutChannel],
-                ) -> Option<VersionWithoutChannel> {
-                    let mut found: Option<&VersionWithoutChannel> = None;
-                    for option in options {
-                        // Only consider options providing a ChromeDriver binary.
-                        // We could never operate without it.
-                        if option.downloads.chromedriver.is_some() {
-                            if found.is_none() {
-                                found = Some(option);
-                            } else {
-                                let last = found.expect("present");
-                                if option.version() > last.version() {
-                                    found = Some(option);
-                                }
-                            }
-                        }
-                    }
-                    found.cloned()
-                }
-
-                let all = KnownGoodVersions::fetch(self.client.clone())
+                let all = KnownGoodVersions::fetch(&self.client)
                     .await
                     .context("Failed to request latest versions.")?;
-                get_latest_with_chromedriver(&all.versions)
+                all.versions
+                    .iter()
+                    .filter(|v| v.downloads.chromedriver.is_some())
+                    .max_by_key(|v| v.version)
+                    .cloned()
                     .map(|v| SelectedVersion::from((v, self.platform)))
             }
             VersionRequest::LatestIn(channel) => {
-                let all = LastKnownGoodVersions::fetch(self.client.clone())
+                let all = LastKnownGoodVersions::fetch(&self.client)
                     .await
                     .context("Failed to request latest versions.")?;
-                all.channels
-                    .get(&channel)
+                all.channel(channel)
                     .cloned()
                     .map(|v| SelectedVersion::from((v, self.platform)))
             }
             VersionRequest::Fixed(version) => {
-                let all = KnownGoodVersions::fetch(self.client.clone())
+                let all = KnownGoodVersions::fetch(&self.client)
                     .await
                     .context("Failed to request latest versions.")?;
                 all.versions
@@ -184,36 +166,11 @@ impl ChromeForTestingManager {
         &self,
         selected: SelectedVersion,
     ) -> Result<LoadedChromePackage, anyhow::Error> {
-        let selected_chrome_download = match selected.chrome.clone() {
-            Some(download) => download,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "No chrome download found for selection {selected:?} using platform {}",
-                    self.platform
-                ));
-            }
-        };
-
-        let selected_chromedriver_download = match selected.chromedriver.clone() {
-            Some(download) => download,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "No chromedriver download found for {selected:?} using platform {}",
-                    self.platform
-                ));
-            }
-        };
-
-        // Check if download is necessary.
-        let version_dir = self.version_dir(selected.version);
-        let platform_dir = version_dir.join(self.platform.to_string());
-        fs::create_dir_all(&platform_dir).await?;
-
         fn determine_chrome_executable(platform_dir: &Path, platform: Platform) -> PathBuf {
-            let unpack_dir = platform_dir.join(format!("chrome-{}", platform));
+            let unpack_dir = platform_dir.join(format!("chrome-{platform}"));
             match platform {
-                Platform::Linux64 | Platform::MacX64 => unpack_dir.join("chrome"),
-                Platform::MacArm64 => unpack_dir
+                Platform::Linux64 => unpack_dir.join("chrome"),
+                Platform::MacX64 | Platform::MacArm64 => unpack_dir
                     .join("Google Chrome for Testing.app")
                     .join("Contents")
                     .join("MacOS")
@@ -222,22 +179,43 @@ impl ChromeForTestingManager {
             }
         }
 
+        let Some(selected_chrome_download) = selected.chrome.clone() else {
+            return Err(anyhow::anyhow!(
+                "No chrome download found for selection {selected:?} using platform {}",
+                self.platform
+            ));
+        };
+
+        let Some(selected_chromedriver_download) = selected.chromedriver.clone() else {
+            return Err(anyhow::anyhow!(
+                "No chromedriver download found for {selected:?} using platform {}",
+                self.platform
+            ));
+        };
+
+        // Check if download is necessary.
+        let version_dir = self.version_dir(selected.version);
+        let platform_dir = version_dir.join(self.platform.to_string());
+        fs::create_dir_all(&platform_dir).await?;
+
         let chrome_executable = determine_chrome_executable(&platform_dir, self.platform);
         let chromedriver_executable = platform_dir
             .join(format!("chromedriver-{}", self.platform))
             .join(self.platform.chromedriver_binary_name());
 
+        let channel_label = selected
+            .channel
+            .map_or_else(String::new, |ch| ch.to_string());
+
         // Download chrome if necessary.
         let is_chrome_downloaded = chrome_executable.exists() && chrome_executable.is_file();
-        if !is_chrome_downloaded {
+        if is_chrome_downloaded {
             tracing::info!(
-                "Installing {} Chrome {}",
-                match selected.channel {
-                    None => "".to_string(),
-                    Some(channel) => channel.to_string(),
-                },
-                selected.version,
+                "Chrome {} already installed at {chrome_executable:?}...",
+                selected.version
             );
+        } else {
+            tracing::info!("Installing {channel_label} Chrome {}", selected.version);
             download::download_zip(
                 &self.client,
                 &selected_chrome_download.url,
@@ -246,24 +224,20 @@ impl ChromeForTestingManager {
                 Artifact::Chrome,
             )
             .await?;
-        } else {
-            tracing::info!(
-                "Chrome {} already installed at {chrome_executable:?}...",
-                selected.version
-            );
         }
 
         // Download chromedriver if necessary.
         let is_chromedriver_downloaded =
             chromedriver_executable.exists() && chromedriver_executable.is_file();
-        if !is_chromedriver_downloaded {
+        if is_chromedriver_downloaded {
             tracing::info!(
-                "Installing {} Chromedriver {}",
-                match selected.channel {
-                    None => "".to_string(),
-                    Some(channel) => channel.to_string(),
-                },
-                selected.version,
+                "Chromedriver {} already installed at {chromedriver_executable:?}...",
+                selected.version
+            );
+        } else {
+            tracing::info!(
+                "Installing {channel_label} Chromedriver {}",
+                selected.version
             );
             download::download_zip(
                 &self.client,
@@ -273,11 +247,6 @@ impl ChromeForTestingManager {
                 Artifact::ChromeDriver,
             )
             .await?;
-        } else {
-            tracing::info!(
-                "Chromedriver {} already installed at {chromedriver_executable:?}...",
-                selected.version
-            );
         }
 
         Ok(LoadedChromePackage {
@@ -304,27 +273,30 @@ impl ChromeForTestingManager {
         match port {
             PortRequest::Any => {}
             PortRequest::Specific(Port(port)) => {
-                command.arg(format!("--port={}", port));
+                command.arg(format!("--port={port}"));
             }
-        };
+        }
         let loglevel = chrome_for_testing::chromedriver::LogLevel::Info;
         command.arg(format!("--log-level={loglevel}"));
 
         self.apply_chromedriver_creation_flags(&mut command);
 
-        let mut chromedriver_process =
-            ProcessHandle::<BroadcastOutputStream>::spawn("chromedriver", command)
-                .context("Failed to spawn chromedriver process.")?;
+        let mut chromedriver_process = Process::new(command)
+            .with_name("chromedriver")
+            .spawn_broadcast()
+            .context("Failed to spawn chromedriver process.")?;
 
         let _out_inspector = chromedriver_process.stdout().inspect_lines(
             |stdout_line| {
+                let stdout_line: &str = &stdout_line;
                 tracing::debug!(stdout_line, "chromedriver log");
                 Next::Continue
             },
             LineParsingOptions::default(),
         );
-        let _err_inspector = chromedriver_process.stdout().inspect_lines(
+        let _err_inspector = chromedriver_process.stderr().inspect_lines(
             |stderr_line| {
+                let stderr_line: &str = &stderr_line;
                 tracing::debug!(stderr_line, "chromedriver log");
                 Next::Continue
             },
@@ -339,15 +311,19 @@ impl ChromeForTestingManager {
             .wait_for_line_with_timeout(
                 move |line| {
                     if line.contains("started successfully on port") {
-                        let port = line
+                        let Some(port) = line
                             .trim()
                             .trim_matches('"')
                             .trim_end_matches('.')
                             .split(' ')
                             .next_back()
-                            .expect("port as segment after last space")
-                            .parse::<u16>()
-                            .expect("port to be a u16");
+                            .and_then(|s| s.parse::<u16>().ok())
+                        else {
+                            tracing::error!(
+                                "Failed to parse port from chromedriver output: {line:?}"
+                            );
+                            return false;
+                        };
                         started_on_port_clone.store(port, std::sync::atomic::Ordering::Release);
                         true
                     } else {
@@ -386,20 +362,23 @@ impl ChromeForTestingManager {
     }
 
     #[cfg(not(target_os = "windows"))]
+    #[allow(clippy::unused_self)] // Symmetry with the Windows variant that uses `self`.
     fn apply_chromedriver_creation_flags<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
     }
 
     #[cfg(feature = "thirtyfour")]
-    pub(crate) async fn prepare_caps(
+    #[allow(clippy::unused_self)] // Takes &self for API consistency with other methods.
+    pub(crate) fn prepare_caps(
         &self,
         loaded: &LoadedChromePackage,
     ) -> Result<thirtyfour::ChromeCapabilities, anyhow::Error> {
+        use thirtyfour::ChromiumLikeCapabilities;
+
         tracing::info!(
             "Registering {:?} in capabilities.",
             loaded.chrome_executable
         );
-        use thirtyfour::ChromiumLikeCapabilities;
         let mut caps = thirtyfour::ChromeCapabilities::new();
         caps.set_headless()?;
         caps.set_binary(loaded.chrome_executable.to_str().expect("valid unicode"))?;
@@ -412,9 +391,8 @@ mod tests {
     use crate::mgr::ChromeForTestingManager;
     use crate::port::Port;
     use crate::port::PortRequest;
-    use crate::prelude::*;
+    use crate::{Channel, Version, VersionRequest};
     use assertr::prelude::*;
-    use chrome_for_testing::api::channel::Channel;
     use serial_test::serial;
 
     #[ctor::ctor]
@@ -425,15 +403,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn clear_cache_and_download_new() -> anyhow::Result<()> {
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         mgr.clear_cache().await?;
         let selected = mgr
             .resolve_version(VersionRequest::LatestIn(Channel::Stable))
             .await?;
         let loaded = mgr.download(selected).await?;
 
-        assert_that(loaded.chrome_executable).exists().is_a_file();
-        assert_that(loaded.chromedriver_executable)
+        assert_that!(loaded.chrome_executable).exists().is_a_file();
+        assert_that!(loaded.chromedriver_executable)
             .exists()
             .is_a_file();
         Ok(())
@@ -442,12 +420,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn resolve_and_download_latest() -> anyhow::Result<()> {
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
 
-        assert_that(loaded.chrome_executable).exists().is_a_file();
-        assert_that(loaded.chromedriver_executable)
+        assert_that!(loaded.chrome_executable).exists().is_a_file();
+        assert_that!(loaded.chromedriver_executable)
             .exists()
             .is_a_file();
         Ok(())
@@ -456,14 +434,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn resolve_and_download_latest_in_stable_channel() -> anyhow::Result<()> {
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         let selected = mgr
             .resolve_version(VersionRequest::LatestIn(Channel::Stable))
             .await?;
         let loaded = mgr.download(selected).await?;
 
-        assert_that(loaded.chrome_executable).exists().is_a_file();
-        assert_that(loaded.chromedriver_executable)
+        assert_that!(loaded.chrome_executable).exists().is_a_file();
+        assert_that!(loaded.chromedriver_executable)
             .exists()
             .is_a_file();
         Ok(())
@@ -472,7 +450,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn resolve_and_download_specific() -> anyhow::Result<()> {
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         let selected = mgr
             .resolve_version(VersionRequest::Fixed(Version {
                 major: 135,
@@ -483,8 +461,8 @@ mod tests {
             .await?;
         let loaded = mgr.download(selected).await?;
 
-        assert_that(loaded.chrome_executable).exists().is_a_file();
-        assert_that(loaded.chromedriver_executable)
+        assert_that!(loaded.chrome_executable).exists().is_a_file();
+        assert_that!(loaded.chromedriver_executable)
             .exists()
             .is_a_file();
         Ok(())
@@ -493,13 +471,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn launch_chromedriver_on_specific_port() -> anyhow::Result<()> {
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
         let (_chromedriver, port) = mgr
             .launch_chromedriver(&loaded, PortRequest::Specific(Port(3333)))
             .await?;
-        assert_that(port).is_equal_to(Port(3333));
+        assert_that!(port).is_equal_to(Port(3333));
         Ok(())
     }
 
@@ -507,17 +485,17 @@ mod tests {
     #[serial]
     async fn download_and_launch_chromedriver_on_random_port_and_prepare_thirtyfour_webdriver()
     -> anyhow::Result<()> {
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
         let (_chromedriver, port) = mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
 
-        let caps = mgr.prepare_caps(&loaded).await?;
+        let caps = mgr.prepare_caps(&loaded)?;
         let driver = thirtyfour::WebDriver::new(format!("http://localhost:{port}"), caps).await?;
         driver.goto("https://www.google.com").await?;
 
         let url = driver.current_url().await?;
-        assert_that(url).has_display_value("https://www.google.com/");
+        assert_that!(url).has_display_value("https://www.google.com/");
 
         driver.quit().await?;
 

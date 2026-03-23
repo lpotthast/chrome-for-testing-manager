@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -5,15 +6,16 @@ use tokio::fs;
 pub(crate) struct CacheDir(PathBuf);
 
 impl CacheDir {
-    pub fn get_or_create() -> Self {
-        let project_dirs = directories::ProjectDirs::from("", "", "chromedriver-manager").unwrap();
+    pub fn get_or_create() -> anyhow::Result<Self> {
+        let project_dirs = directories::ProjectDirs::from("", "", "chrome-for-testing-manager")
+            .context("Failed to determine cache directory (is $HOME set?)")?;
 
         let cache_dir = project_dirs.cache_dir();
         if !cache_dir.exists() {
-            std::fs::create_dir_all(cache_dir).unwrap();
+            std::fs::create_dir_all(cache_dir).context("Failed to create cache directory")?;
         }
 
-        Self(cache_dir.to_owned())
+        Ok(Self(cache_dir.to_owned()))
     }
 
     pub fn path(&self) -> &PathBuf {

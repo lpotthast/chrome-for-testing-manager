@@ -1,7 +1,7 @@
 use crate::mgr::{ChromeForTestingManager, LoadedChromePackage, VersionRequest};
 use crate::port::{Port, PortRequest};
 use anyhow::anyhow;
-use chrome_for_testing::api::channel::Channel;
+use chrome_for_testing::Channel;
 use std::fmt::{Debug, Formatter};
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -27,10 +27,10 @@ pub struct Chromedriver {
     ///
     /// Always stores a process handle. The value is only taken out on termination,
     /// notifying our `Drop` impl that the process was gracefully terminated when seeing `None`.
-    chromedriver_process: Option<TerminateOnDrop<BroadcastOutputStream>>,
+    process: Option<TerminateOnDrop<BroadcastOutputStream>>,
 
     /// The port the chromedriver process listens on.
-    chromedriver_port: Port,
+    port: Port,
 }
 
 impl Debug for Chromedriver {
@@ -38,13 +38,19 @@ impl Debug for Chromedriver {
         f.debug_struct("Chromedriver")
             .field("mgr", &self.mgr)
             .field("loaded", &self.loaded)
-            .field("chromedriver_process", &self.chromedriver_process)
-            .field("chromedriver_port", &self.chromedriver_port)
+            .field("process", &self.process)
+            .field("port", &self.port)
             .finish()
     }
 }
 
 impl Chromedriver {
+    /// Resolve, download, and launch a chromedriver process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime is not multithreaded, version resolution fails,
+    /// the download fails, or the chromedriver process cannot be spawned.
     pub async fn run(version: VersionRequest, port: PortRequest) -> anyhow::Result<Chromedriver> {
         // Assert that async-drop will work.
         // This is the only way of constructing a `Chromedriver` instance,
@@ -63,57 +69,90 @@ impl Chromedriver {
             }
         }
 
-        let mgr = ChromeForTestingManager::new();
+        let mgr = ChromeForTestingManager::new()?;
         let selected = mgr.resolve_version(version).await?;
         let loaded = mgr.download(selected).await?;
-        let (chromedriver_process, chromedriver_port) =
-            mgr.launch_chromedriver(&loaded, port).await?;
+        let (process_handle, actual_port) = mgr.launch_chromedriver(&loaded, port).await?;
         Ok(Chromedriver {
-            chromedriver_process: Some(
-                chromedriver_process
-                    .terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3)),
+            process: Some(
+                process_handle.terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3)),
             ),
-            chromedriver_port,
+            port: actual_port,
             loaded,
             mgr,
         })
     }
 
+    /// Shortcut for [`Self::run`] with the latest stable channel version on any port.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::run`].
     pub async fn run_latest_stable() -> anyhow::Result<Chromedriver> {
         Self::run(VersionRequest::LatestIn(Channel::Stable), PortRequest::Any).await
     }
 
+    /// Shortcut for [`Self::run`] with the latest beta channel version on any port.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::run`].
     pub async fn run_latest_beta() -> anyhow::Result<Chromedriver> {
         Self::run(VersionRequest::LatestIn(Channel::Beta), PortRequest::Any).await
     }
 
+    /// Shortcut for [`Self::run`] with the latest dev channel version on any port.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::run`].
     pub async fn run_latest_dev() -> anyhow::Result<Chromedriver> {
         Self::run(VersionRequest::LatestIn(Channel::Dev), PortRequest::Any).await
     }
 
+    /// Shortcut for [`Self::run`] with the latest canary channel version on any port.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::run`].
     pub async fn run_latest_canary() -> anyhow::Result<Chromedriver> {
         Self::run(VersionRequest::LatestIn(Channel::Canary), PortRequest::Any).await
     }
 
+    /// Gracefully terminate the chromedriver process with default timeouts (3s each).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process cannot be terminated within the timeout.
     pub async fn terminate(self) -> Result<ExitStatus, TerminationError> {
         self.terminate_with_timeouts(Duration::from_secs(3), Duration::from_secs(3))
             .await
     }
 
+    /// Gracefully terminate the chromedriver process with custom timeouts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process cannot be terminated within the given timeouts.
+    #[expect(clippy::missing_panics_doc)] // Process handle is always present; only taken here.
     pub async fn terminate_with_timeouts(
         mut self,
         interrupt_timeout: Duration,
         terminate_timeout: Duration,
     ) -> Result<ExitStatus, TerminationError> {
-        self.chromedriver_process
+        self.process
             .take()
             .expect("present")
             .terminate(interrupt_timeout, terminate_timeout)
             .await
     }
 
-    /// Execute an async closure with a WebDriver session.
+    /// Execute an async closure with a `WebDriver` session.
     /// The session will be automatically cleaned up after the closure completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if session creation fails or the user closure returns an error.
     #[cfg(feature = "thirtyfour")]
     pub async fn with_session(
         &self,
@@ -122,8 +161,12 @@ impl Chromedriver {
         self.with_custom_session(|_caps| Ok(()), f).await
     }
 
-    /// Execute an async closure with a custom-configured WebDriver session.
+    /// Execute an async closure with a custom-configured `WebDriver` session.
     /// The session will be automatically cleaned up after the closure completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if capability setup, session creation, or the user closure fails.
     #[cfg(feature = "thirtyfour")]
     pub async fn with_custom_session<F>(
         &self,
@@ -141,13 +184,10 @@ impl Chromedriver {
         use anyhow::Context;
         use futures::FutureExt;
 
-        let mut caps = self.mgr.prepare_caps(&self.loaded).await?;
+        let mut caps = self.mgr.prepare_caps(&self.loaded)?;
         setup(&mut caps).context("Failed to set up chrome capabilities.")?;
-        let driver = thirtyfour::WebDriver::new(
-            format!("http://localhost:{}", self.chromedriver_port),
-            caps,
-        )
-        .await?;
+        let driver =
+            thirtyfour::WebDriver::new(format!("http://localhost:{}", self.port), caps).await?;
 
         let session = Session { driver };
 

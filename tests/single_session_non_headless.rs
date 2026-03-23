@@ -1,4 +1,4 @@
-use chrome_for_testing_manager::prelude::*;
+use chrome_for_testing_manager::*;
 use thirtyfour::prelude::*;
 
 mod common;

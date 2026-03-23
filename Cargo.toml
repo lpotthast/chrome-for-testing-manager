@@ -1,14 +1,14 @@
 [package]
 name = "chrome-for-testing-manager"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.85.1"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
 description = """
 Programmatic management of chrome-for-testing installations.
 """
 categories = ["web-programming", "development-tools::testing"]
-keywords = ["chrome", "testing", "chromedriver", "thirtyfour"]
+keywords = ["chrome", "chromedriver", "webdriver", "selenium", "browser-testing"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
@@ -17,24 +17,24 @@ authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
 thirtyfour = ["dep:thirtyfour"]
 
 [dependencies]
-anyhow = "1.0.95"
-chrome-for-testing = "0.2.0"
+anyhow = "1.0.34"
+chrome-for-testing = "0.3.0"
 directories = "6.0.0"
-futures = "0.3.31"
-indoc = "2.0.6"
-reqwest = "0.12.12"
+futures = "0.3.0"
+indoc = "2.0.0"
+reqwest = "0.13.2"
 thirtyfour = { version = "0.36.1", optional = true }
-thiserror = "2.0.16"
-tokio = { version = "1", features = ["fs", "process"] }
-tokio-process-tools = "0.5.4"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["fs", "process", "time"] }
+tokio-process-tools = "0.7.2"
 tracing = "0.1.41"
-zip-extensions = "0.8.1"
+zip = { version = "8.0.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-assertr = "0.4.0"
+assertr = "0.4.4"
 chrome-for-testing-manager = { path = ".", features = ["thirtyfour"] }
-# ^.. This is a somewhat hacky way to say: Please enable the "thirtyfour" features for all tests.
-ctor = "0.5.0"
-serial_test = "3.2.0"
-tokio = { version = "1.45.1", features = ["macros"] }
-tracing-subscriber = "0.3.19"
+# ^.. This is a way to say: Please enable the "thirtyfour" feature for all tests.
+ctor = "0.6.3"
+serial_test = "3.4.0"
+tokio = { version = "1.50.0", features = ["macros"] }
+tracing-subscriber = "0.3.23"

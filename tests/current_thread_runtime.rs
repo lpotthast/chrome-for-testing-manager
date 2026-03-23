@@ -1,11 +1,11 @@
 use assertr::prelude::*;
-use chrome_for_testing_manager::prelude::*;
+use chrome_for_testing_manager::*;
 
 #[tokio::test]
 async fn unusable_on_non_multithreaded_runtime() {
     tracing_subscriber::fmt().try_init().ok();
 
-    assert_that(Chromedriver::run_latest_beta().await)
+    assert_that!(Chromedriver::run_latest_beta().await)
         .is_err()
         .derive(|it| it.to_string())
         .is_equal_to(indoc::formatdoc! {r#"

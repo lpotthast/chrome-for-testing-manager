@@ -14,8 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Upgrade `tokio-process-tools` to 0.8.1.
-- Upgrade `assertr` dev dependency to 0.5.0.
 - **Breaking:** Upgrade `chrome-for-testing` dependency to 0.4.0.
 - Bump MSRV to 1.89.0.
 - **Breaking:** Switch public fallible APIs from `anyhow` to typed `rootcause` reports.
@@ -29,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `with_session` and `with_custom_session` now return the user closure's output value.
 - User session callback errors are attached to `ChromeForTestingManagerError::RunSessionCallback` reports, while user
   callback panics now resume after best-effort session cleanup.
+- Upgrade `tokio-process-tools` to 0.8.1.
+- Upgrade `assertr` dev dependency to 0.5.0.
 - Update README examples for `rootcause` and version 0.8.
 
 ### Removed

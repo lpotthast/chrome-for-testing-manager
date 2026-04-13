@@ -12,6 +12,14 @@ keywords = ["chrome", "chromedriver", "webdriver", "selenium", "browser-testing"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
+exclude = [
+    ".claude",
+    ".idea",
+    ".vscode",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Justfile",
+]
 
 [features]
 thirtyfour = ["dep:thirtyfour"]

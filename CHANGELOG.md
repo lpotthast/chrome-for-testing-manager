@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] - 2026-04-13
 
 ### Added
 
@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Bump MSRV to 1.89.0.
 - **Breaking:** Switch public fallible APIs from `anyhow` to typed `rootcause` reports.
 - **Breaking:** `VersionRequest` is no longer `Copy` because upstream `Channel` is no longer `Copy`.
-- **Breaking:** `with_session` and `with_custom_session` now accept arbitrary user error types that can be converted into
-  a `rootcause` report.
+- **Breaking:** `with_session` and `with_custom_session` now accept arbitrary user error types that can be converted
+  into a `rootcause` report.
 - **Breaking:** `Chromedriver::terminate` and `Chromedriver::terminate_with_timeouts` now return typed `rootcause`
   reports.
 - Upstream `chrome-for-testing` errors are now preserved as typed `rootcause` reports under manager error contexts.
@@ -162,7 +162,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
-[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.8.0...HEAD
+
+[0.8.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.7.1...0.8.0
 
 [0.7.1]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.7.0...0.7.1
 

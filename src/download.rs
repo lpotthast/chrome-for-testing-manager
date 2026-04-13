@@ -1,5 +1,5 @@
-use crate::mgr::Artifact;
-use anyhow::Context;
+use crate::{ChromeForTestingArtifact, ChromeForTestingManagerError};
+use rootcause::{Report, bail, prelude::ResultExt};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -17,16 +17,23 @@ pub(crate) async fn download_zip(
     url: &str,
     download_dir: &Path,
     unpack_dir: &Path,
-    artifact: Artifact,
-) -> anyhow::Result<()> {
+    artifact: ChromeForTestingArtifact,
+) -> Result<(), Report<ChromeForTestingManagerError>> {
     // Initiate download and validate HTTP response.
     tracing::info!("Downloading from {url:?}...");
     let response = client
         .get(url)
         .send()
-        .await?
+        .await
+        .context(ChromeForTestingManagerError::Download {
+            artifact,
+            url: url.to_owned(),
+        })?
         .error_for_status()
-        .context("Download failed with non-success HTTP status")?;
+        .context(ChromeForTestingManagerError::Download {
+            artifact,
+            url: url.to_owned(),
+        })?;
 
     // Create new file for storage.
     let download_file_path = download_dir.join(format!("{artifact}.zip"));
@@ -36,35 +43,53 @@ pub(crate) async fn download_zip(
         .truncate(true)
         .open(&download_file_path)
         .await
-        .context("Failed to open new file to write downloaded zip into.")?;
+        .context(ChromeForTestingManagerError::CreateDownloadFile {
+            artifact,
+            path: download_file_path.clone(),
+        })?;
 
     // Perform the download.
-    write_file(&mut file, response).await?;
+    write_file(&mut file, response, artifact).await?;
     tracing::info!("Download complete");
 
     // Open and validate the archive.
-    let zip_file =
-        fs::File::open(&download_file_path).context("Failed to open downloaded zip file")?;
+    let zip_file = fs::File::open(&download_file_path).context(
+        ChromeForTestingManagerError::OpenDownloadedZip {
+            path: download_file_path.clone(),
+        },
+    )?;
     let mut archive =
-        ZipArchive::new(zip_file).context("Downloaded file is not a valid ZIP archive")?;
+        ZipArchive::new(zip_file).context(ChromeForTestingManagerError::InvalidZip {
+            path: download_file_path.clone(),
+        })?;
 
     // Guard against zip bombs.
-    if let Some(size) = archive.decompressed_size() {
-        anyhow::ensure!(
-            size <= MAX_DECOMPRESSED_SIZE,
-            "Archive decompressed size ({size} bytes) exceeds the {MAX_DECOMPRESSED_SIZE}-byte safety limit"
-        );
+    if let Some(size) = archive.decompressed_size()
+        && size > MAX_DECOMPRESSED_SIZE
+    {
+        bail!(ChromeForTestingManagerError::ZipTooLarge {
+            path: download_file_path.clone(),
+            size,
+            max_size: MAX_DECOMPRESSED_SIZE,
+        });
     }
 
     // Extract.
     tracing::info!("Extracting to {unpack_dir:?}...");
     archive
         .extract(unpack_dir)
-        .context("Failed to extract ZIP archive")?;
+        .context(ChromeForTestingManagerError::ExtractZip {
+            path: download_file_path.clone(),
+            unpack_dir: unpack_dir.to_owned(),
+        })?;
     tracing::info!("Extraction complete");
 
     // Remove downloaded archive.
-    fs::remove_file(&download_file_path).context("Failed to remove zip file.")?;
+    fs::remove_file(&download_file_path).context(
+        ChromeForTestingManagerError::RemoveDownloadedZip {
+            path: download_file_path,
+        },
+    )?;
 
     Ok(())
 }
@@ -72,7 +97,8 @@ pub(crate) async fn download_zip(
 async fn write_file(
     file: &mut tokio::fs::File,
     mut response: reqwest::Response,
-) -> anyhow::Result<()> {
+    artifact: ChromeForTestingArtifact,
+) -> Result<(), Report<ChromeForTestingManagerError>> {
     if let Some(content_length) = response.content_length() {
         #[allow(clippy::cast_precision_loss)] // Display-only; precision loss is irrelevant.
         let content_length_mb = content_length as f64 / (1024.0 * 1024.0);
@@ -85,10 +111,19 @@ async fn write_file(
         match timeout(CHUNK_TIMEOUT, response.chunk()).await {
             Ok(Ok(Some(chunk))) => {
                 consecutive_stalls = 0;
-                file.write_all(&chunk).await?;
+                file.write_all(&chunk)
+                    .await
+                    .context(ChromeForTestingManagerError::WriteDownloadFile { artifact })?;
             }
             Ok(Ok(None)) => break,
-            Ok(Err(err)) => return Err(err.into()),
+            Ok(Err(err)) => {
+                return Err(
+                    Report::new(err).context(ChromeForTestingManagerError::Download {
+                        artifact,
+                        url: response.url().to_string(),
+                    }),
+                );
+            }
             Err(_elapsed) => {
                 consecutive_stalls += 1;
                 tracing::warn!(
@@ -96,16 +131,19 @@ async fn write_file(
                     "Download stalled (no data received for {CHUNK_TIMEOUT:?})."
                 );
                 if consecutive_stalls >= MAX_CONSECUTIVE_STALLS {
-                    anyhow::bail!(
-                        "Download timed out after {MAX_CONSECUTIVE_STALLS} consecutive \
-                         stalls of {CHUNK_TIMEOUT:?} each."
-                    );
+                    bail!(ChromeForTestingManagerError::DownloadStalled {
+                        artifact,
+                        consecutive_stalls,
+                        chunk_timeout: CHUNK_TIMEOUT,
+                    });
                 }
             }
         }
     }
 
-    file.flush().await?;
+    file.flush()
+        .await
+        .context(ChromeForTestingManagerError::FlushDownloadFile { artifact })?;
 
-    anyhow::Ok(())
+    Ok(())
 }

@@ -1,12 +1,13 @@
 use assertr::prelude::*;
 use chrome_for_testing_manager::*;
+use rootcause::Report;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
 mod common;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn multiple_sessions() -> anyhow::Result<()> {
+async fn multiple_sessions() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
     // NOTE: Using beta channel as stable channel chromedriver was bugged on Linux...

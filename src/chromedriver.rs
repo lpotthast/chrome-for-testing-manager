@@ -1,13 +1,17 @@
+use crate::ChromeForTestingManagerError;
 use crate::mgr::{ChromeForTestingManager, LoadedChromePackage, VersionRequest};
 use crate::port::{Port, PortRequest};
-use anyhow::anyhow;
 use chrome_for_testing::Channel;
+use rootcause::prelude::ResultExt;
+#[cfg(feature = "thirtyfour")]
+use rootcause::{IntoReportCollection, markers::SendSync};
+use rootcause::{Report, report};
 use std::fmt::{Debug, Formatter};
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::runtime::RuntimeFlavor;
+use tokio_process_tools::TerminateOnDrop;
 use tokio_process_tools::broadcast::BroadcastOutputStream;
-use tokio_process_tools::{TerminateOnDrop, TerminationError};
 
 /// A wrapper struct for a spawned chromedriver process.
 /// Keep this alive until your test is complete.
@@ -51,21 +55,19 @@ impl Chromedriver {
     ///
     /// Returns an error if the runtime is not multithreaded, version resolution fails,
     /// the download fails, or the chromedriver process cannot be spawned.
-    pub async fn run(version: VersionRequest, port: PortRequest) -> anyhow::Result<Chromedriver> {
+    pub async fn run(
+        version: VersionRequest,
+        port: PortRequest,
+    ) -> Result<Chromedriver, Report<ChromeForTestingManagerError>> {
         // Assert that async-drop will work.
         // This is the only way of constructing a `Chromedriver` instance,
         // so it's safe to do this here.
         match tokio::runtime::Handle::current().runtime_flavor() {
             RuntimeFlavor::MultiThread => { /* we want this */ }
             unsupported_flavor => {
-                return Err(anyhow!(indoc::formatdoc! {r#"
-                    The Chromedriver type requires a multithreaded tokio runtime,
-                    as we rely on async-drop functionality not available on a single-threaded runtime.
-
-                    Detected runtime flavor: {unsupported_flavor:?}.
-
-                    If you are writing a test, annotate it with `#[tokio::test(flavor = "multi_thread")]`.
-                "#}));
+                return Err(report!(ChromeForTestingManagerError::UnsupportedRuntime {
+                    runtime_flavor: unsupported_flavor,
+                }));
             }
         }
 
@@ -88,7 +90,7 @@ impl Chromedriver {
     /// # Errors
     ///
     /// See [`Self::run`].
-    pub async fn run_latest_stable() -> anyhow::Result<Chromedriver> {
+    pub async fn run_latest_stable() -> Result<Chromedriver, Report<ChromeForTestingManagerError>> {
         Self::run(VersionRequest::LatestIn(Channel::Stable), PortRequest::Any).await
     }
 
@@ -97,7 +99,7 @@ impl Chromedriver {
     /// # Errors
     ///
     /// See [`Self::run`].
-    pub async fn run_latest_beta() -> anyhow::Result<Chromedriver> {
+    pub async fn run_latest_beta() -> Result<Chromedriver, Report<ChromeForTestingManagerError>> {
         Self::run(VersionRequest::LatestIn(Channel::Beta), PortRequest::Any).await
     }
 
@@ -106,7 +108,7 @@ impl Chromedriver {
     /// # Errors
     ///
     /// See [`Self::run`].
-    pub async fn run_latest_dev() -> anyhow::Result<Chromedriver> {
+    pub async fn run_latest_dev() -> Result<Chromedriver, Report<ChromeForTestingManagerError>> {
         Self::run(VersionRequest::LatestIn(Channel::Dev), PortRequest::Any).await
     }
 
@@ -115,7 +117,7 @@ impl Chromedriver {
     /// # Errors
     ///
     /// See [`Self::run`].
-    pub async fn run_latest_canary() -> anyhow::Result<Chromedriver> {
+    pub async fn run_latest_canary() -> Result<Chromedriver, Report<ChromeForTestingManagerError>> {
         Self::run(VersionRequest::LatestIn(Channel::Canary), PortRequest::Any).await
     }
 
@@ -124,7 +126,7 @@ impl Chromedriver {
     /// # Errors
     ///
     /// Returns an error if the process cannot be terminated within the timeout.
-    pub async fn terminate(self) -> Result<ExitStatus, TerminationError> {
+    pub async fn terminate(self) -> Result<ExitStatus, Report<ChromeForTestingManagerError>> {
         self.terminate_with_timeouts(Duration::from_secs(3), Duration::from_secs(3))
             .await
     }
@@ -139,12 +141,13 @@ impl Chromedriver {
         mut self,
         interrupt_timeout: Duration,
         terminate_timeout: Duration,
-    ) -> Result<ExitStatus, TerminationError> {
+    ) -> Result<ExitStatus, Report<ChromeForTestingManagerError>> {
         self.process
             .take()
             .expect("present")
             .terminate(interrupt_timeout, terminate_timeout)
             .await
+            .context(ChromeForTestingManagerError::TerminateChromedriver { port: self.port })
     }
 
     /// Execute an async closure with a `WebDriver` session.
@@ -154,10 +157,14 @@ impl Chromedriver {
     ///
     /// Returns an error if session creation fails or the user closure returns an error.
     #[cfg(feature = "thirtyfour")]
-    pub async fn with_session(
+    pub async fn with_session<T, E, F>(
         &self,
-        f: impl AsyncFnOnce(&crate::session::Session) -> Result<(), crate::session::SessionError>,
-    ) -> anyhow::Result<()> {
+        f: F,
+    ) -> Result<T, Report<ChromeForTestingManagerError>>
+    where
+        F: for<'a> AsyncFnOnce(&'a crate::session::Session) -> Result<T, E>,
+        E: IntoReportCollection<SendSync>,
+    {
         self.with_custom_session(|_caps| Ok(()), f).await
     }
 
@@ -168,26 +175,25 @@ impl Chromedriver {
     ///
     /// Returns an error if capability setup, session creation, or the user closure fails.
     #[cfg(feature = "thirtyfour")]
-    pub async fn with_custom_session<F>(
+    pub async fn with_custom_session<T, E, F>(
         &self,
         setup: impl Fn(
             &mut thirtyfour::ChromeCapabilities,
         ) -> Result<(), thirtyfour::prelude::WebDriverError>,
         f: F,
-    ) -> anyhow::Result<()>
+    ) -> Result<T, Report<ChromeForTestingManagerError>>
     where
-        F: for<'a> AsyncFnOnce(
-            &'a crate::session::Session,
-        ) -> Result<(), crate::session::SessionError>,
+        F: for<'a> AsyncFnOnce(&'a crate::session::Session) -> Result<T, E>,
+        E: IntoReportCollection<SendSync>,
     {
         use crate::session::Session;
-        use anyhow::Context;
         use futures::FutureExt;
 
         let mut caps = self.mgr.prepare_caps(&self.loaded)?;
-        setup(&mut caps).context("Failed to set up chrome capabilities.")?;
-        let driver =
-            thirtyfour::WebDriver::new(format!("http://localhost:{}", self.port), caps).await?;
+        setup(&mut caps).context(ChromeForTestingManagerError::ConfigureSessionCapabilities)?;
+        let driver = thirtyfour::WebDriver::new(format!("http://localhost:{}", self.port), caps)
+            .await
+            .context(ChromeForTestingManagerError::StartWebDriverSession { port: self.port })?;
 
         let session = Session { driver };
 
@@ -196,18 +202,34 @@ impl Chromedriver {
             .catch_unwind()
             .await;
 
-        // No matter what happened, clean up the session!
-        session.quit().await?;
-
-        // Handle panics.
-        let result = maybe_panicked.map_err(|err| {
-            let err = anyhow::anyhow!("{err:?}");
-            crate::session::SessionError::Panic {
-                reason: err.to_string(),
+        let user_result = match maybe_panicked {
+            Ok(result) => result.context(ChromeForTestingManagerError::RunSessionCallback),
+            Err(payload) => {
+                if let Err(quit_err) = session.quit().await {
+                    tracing::error!(
+                        "Failed to quit WebDriver session after user callback panic: {quit_err:?}"
+                    );
+                }
+                std::panic::resume_unwind(payload);
             }
-        })?;
+        };
 
-        // Map the `SessionError` into an `anyhow::Error`.
-        result.map_err(Into::into)
+        // No matter what happened, clean up the session.
+        let quit_result = session.quit().await;
+
+        match (user_result, quit_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(quit_err)) => Err(quit_err),
+            (Err(user_err), Ok(())) => Err(user_err),
+            (Err(mut user_err), Err(quit_err)) => {
+                tracing::error!(
+                    "Failed to quit WebDriver session after user failure: {quit_err:?}"
+                );
+                user_err
+                    .children_mut()
+                    .push(quit_err.into_dynamic().into_cloneable());
+                Err(user_err)
+            }
+        }
     }
 }

@@ -1,4 +1,5 @@
-use anyhow::Context;
+use crate::ChromeForTestingManagerError;
+use rootcause::{Report, option_ext::OptionExt, prelude::ResultExt};
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -6,13 +7,17 @@ use tokio::fs;
 pub(crate) struct CacheDir(PathBuf);
 
 impl CacheDir {
-    pub fn get_or_create() -> anyhow::Result<Self> {
+    pub fn get_or_create() -> Result<Self, Report<ChromeForTestingManagerError>> {
         let project_dirs = directories::ProjectDirs::from("", "", "chrome-for-testing-manager")
-            .context("Failed to determine cache directory (is $HOME set?)")?;
+            .context(ChromeForTestingManagerError::DetermineCacheDir)?;
 
         let cache_dir = project_dirs.cache_dir();
         if !cache_dir.exists() {
-            std::fs::create_dir_all(cache_dir).context("Failed to create cache directory")?;
+            std::fs::create_dir_all(cache_dir).context(
+                ChromeForTestingManagerError::CreateCacheDir {
+                    cache_dir: cache_dir.to_owned(),
+                },
+            )?;
         }
 
         Ok(Self(cache_dir.to_owned()))
@@ -22,10 +27,18 @@ impl CacheDir {
         &self.0
     }
 
-    pub async fn clear(&self) -> anyhow::Result<()> {
-        tracing::info!("Clearing cache at {:?}...", self.path());
-        fs::remove_dir_all(self.path()).await?;
-        fs::create_dir_all(self.path()).await?;
+    pub async fn clear(&self) -> Result<(), Report<ChromeForTestingManagerError>> {
+        tracing::debug!("Clearing cache at {:?}...", self.path());
+        fs::remove_dir_all(self.path()).await.context(
+            ChromeForTestingManagerError::RemoveCacheDir {
+                cache_dir: self.path().clone(),
+            },
+        )?;
+        fs::create_dir_all(self.path()).await.context(
+            ChromeForTestingManagerError::RecreateCacheDir {
+                cache_dir: self.path().clone(),
+            },
+        )?;
         Ok(())
     }
 }

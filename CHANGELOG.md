@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Add public `ChromeForTestingManagerError` and `ChromeForTestingArtifact` error context types.
+- Add `AGENTS.md` guidance.
+
+### Changed
+
+- Upgrade `tokio-process-tools` to 0.8.1.
+- Upgrade `assertr` dev dependency to 0.5.0.
+- **Breaking:** Upgrade `chrome-for-testing` dependency to 0.4.0.
+- Bump MSRV to 1.89.0.
+- **Breaking:** Switch public fallible APIs from `anyhow` to typed `rootcause` reports.
+- **Breaking:** `VersionRequest` is no longer `Copy` because upstream `Channel` is no longer `Copy`.
+- **Breaking:** `with_session` and `with_custom_session` now accept arbitrary user error types that can be converted into
+  a `rootcause` report.
+- **Breaking:** `Chromedriver::terminate` and `Chromedriver::terminate_with_timeouts` now return typed `rootcause`
+  reports.
+- Upstream `chrome-for-testing` errors are now preserved as typed `rootcause` reports under manager error contexts.
+- Use upstream `Platform` executable path helpers for cached Chrome and ChromeDriver paths.
+- `with_session` and `with_custom_session` now return the user closure's output value.
+- User session callback errors are attached to `ChromeForTestingManagerError::RunSessionCallback` reports, while user
+  callback panics now resume after best-effort session cleanup.
+- Update README examples for `rootcause` and version 0.8.
+
+### Removed
+
+- **Breaking:** Remove `SessionError`.
+
+### Fixed
+
+- Terminate a spawned ChromeDriver process if startup detection times out or the output stream closes.
+
 ## [0.7.1] - 2026-03-23
 
 ### Fixed

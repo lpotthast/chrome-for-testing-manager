@@ -1,4 +1,6 @@
-use thiserror::Error;
+use crate::ChromeForTestingManagerError;
+use rootcause::Report;
+use rootcause::prelude::ResultExt;
 
 /// A browser session. Used to control the browser.
 ///
@@ -6,21 +8,7 @@ use thiserror::Error;
 /// session can be seen as the `driver`.
 #[derive(Debug)]
 pub struct Session {
-    #[cfg(feature = "thirtyfour")]
     pub(crate) driver: thirtyfour::WebDriver,
-}
-
-#[derive(Debug, Error)]
-pub enum SessionError {
-    #[error("The user code panicked:\n{reason}")]
-    Panic { reason: String },
-
-    #[cfg(feature = "thirtyfour")]
-    #[error("thirtyfour WebDriverError")]
-    Thirtyfour {
-        #[from]
-        source: thirtyfour::error::WebDriverError,
-    },
 }
 
 impl Session {
@@ -28,21 +16,15 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns a [`SessionError`] if the underlying `WebDriver` session cannot be closed.
-    pub async fn quit(self) -> Result<(), SessionError> {
-        #[cfg(feature = "thirtyfour")]
-        {
-            self.driver.quit().await.map_err(Into::into)
-        }
-
-        #[cfg(not(feature = "thirtyfour"))]
-        {
-            Ok(())
-        }
+    /// Returns an error if the underlying `WebDriver` session cannot be closed.
+    pub(crate) async fn quit(self) -> Result<(), Report<ChromeForTestingManagerError>> {
+        self.driver
+            .quit()
+            .await
+            .context(ChromeForTestingManagerError::QuitSession)
     }
 }
 
-#[cfg(feature = "thirtyfour")]
 impl std::ops::Deref for Session {
     type Target = thirtyfour::WebDriver;
 

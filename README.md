@@ -19,12 +19,12 @@ Frees you from the need to
 
 ```toml
 [dependencies]
+chrome-for-testing-manager = { version = "0.8", features = ["thirtyfour"] }
+rootcause = "0.12"
 thirtyfour = "0.36"
-chrome-for-testing-manager = { version = "0.7", features = ["thirtyfour"] }
 
 # Additional dependencies for the example below.
-assertr = "0.4"
-anyhow = "1"
+assertr = "0.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -32,13 +32,15 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use assertr::prelude::*;
-use chrome_for_testing_manager::*;
+use chrome_for_testing_manager::{ChromeForTestingManagerError, Chromedriver};
+use rootcause::Report;
+use std::time::Duration;
 use thirtyfour::prelude::*;
 
 // This library requires being used in a multithreaded runtime.
 // If you want to run a test, use: `#[tokio::test(flavor = "multi_thread")]`.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Report> {
     Chromedriver::run_latest_stable()
         .await?
         .with_session(async |session| {
@@ -66,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## MSRV
 
+- Starting from version `0.8.0`, the minimum supported rust version is `1.89.0`
 - Starting from version `0.7.0`, the minimum supported rust version is `1.85.1`
 - Starting from version `0.5.0`, the minimum supported rust version is `1.85.0`
 - Starting from version `0.1.0`, the minimum supported rust version is `1.81.0`

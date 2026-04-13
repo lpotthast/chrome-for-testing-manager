@@ -1,9 +1,10 @@
 use assertr::prelude::*;
 use chrome_for_testing_manager::*;
+use rootcause::Report;
 use std::time::Duration;
 use thirtyfour::prelude::*;
 
-pub async fn test_wikipedia(session: &Session) -> Result<(), SessionError> {
+pub async fn test_wikipedia(session: &Session) -> Result<(), Report<WebDriverError>> {
     session.goto("wikipedia.org").await?;
 
     let url = session.current_url().await?;

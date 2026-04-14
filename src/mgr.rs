@@ -1,5 +1,6 @@
 use crate::cache::CacheDir;
 use crate::download;
+use crate::output::{DriverOutputInspectors, DriverOutputListener};
 use crate::port::{Port, PortRequest};
 use crate::{ChromeForTestingArtifact, ChromeForTestingManagerError};
 use chrome_for_testing::{
@@ -14,7 +15,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
 use tokio_process_tools::broadcast::BroadcastOutputStream;
-use tokio_process_tools::{LineParsingOptions, Next, Process, ProcessHandle, WaitForLineResult};
+use tokio_process_tools::{LineParsingOptions, Process, ProcessHandle, WaitForLineResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionRequest {
@@ -237,8 +238,15 @@ impl ChromeForTestingManager {
         &self,
         loaded: &LoadedChromePackage,
         port: PortRequest,
-    ) -> Result<(ProcessHandle<BroadcastOutputStream>, Port), Report<ChromeForTestingManagerError>>
-    {
+        output_listener: Option<DriverOutputListener>,
+    ) -> Result<
+        (
+            ProcessHandle<BroadcastOutputStream>,
+            Port,
+            DriverOutputInspectors,
+        ),
+        Report<ChromeForTestingManagerError>,
+    > {
         let chromedriver_exe_path_str = loaded
             .chromedriver_executable
             .to_str()
@@ -267,22 +275,8 @@ impl ChromeForTestingManager {
                 path: loaded.chromedriver_executable.clone(),
             })?;
 
-        let _out_inspector = chromedriver_process.stdout().inspect_lines(
-            |stdout_line| {
-                let stdout_line: &str = &stdout_line;
-                tracing::debug!(stdout_line, "chromedriver log");
-                Next::Continue
-            },
-            LineParsingOptions::default(),
-        );
-        let _err_inspector = chromedriver_process.stderr().inspect_lines(
-            |stderr_line| {
-                let stderr_line: &str = &stderr_line;
-                tracing::debug!(stderr_line, "chromedriver log");
-                Next::Continue
-            },
-            LineParsingOptions::default(),
-        );
+        let output_inspectors =
+            DriverOutputInspectors::start(&chromedriver_process, output_listener);
 
         tracing::info!("Waiting for chromedriver to start...");
         let started_on_port = Arc::new(AtomicU16::new(0));
@@ -344,6 +338,7 @@ impl ChromeForTestingManager {
         Ok((
             chromedriver_process,
             Port(Arc::into_inner(started_on_port).unwrap().into_inner()),
+            output_inspectors,
         ))
     }
 
@@ -483,8 +478,8 @@ mod tests {
         let mgr = ChromeForTestingManager::new()?;
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
-        let (chromedriver, port) = mgr
-            .launch_chromedriver(&loaded, PortRequest::Specific(Port(3333)))
+        let (chromedriver, port, _output_inspectors) = mgr
+            .launch_chromedriver(&loaded, PortRequest::Specific(Port(3333)), None)
             .await?;
         let _chromedriver =
             chromedriver.terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3));
@@ -499,7 +494,9 @@ mod tests {
         let mgr = ChromeForTestingManager::new()?;
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
-        let (chromedriver, port) = mgr.launch_chromedriver(&loaded, PortRequest::Any).await?;
+        let (chromedriver, port, _output_inspectors) = mgr
+            .launch_chromedriver(&loaded, PortRequest::Any, None)
+            .await?;
         let _chromedriver =
             chromedriver.terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3));
 

@@ -8,8 +8,7 @@ mod common;
 async fn single_session_non_headless() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    // NOTE: Using beta channel as stable channel chromedriver was bugged on Linux...
-    Chromedriver::run_latest_beta()
+    Chromedriver::run(ChromedriverRunConfig::default())
         .await?
         .with_custom_session(
             |caps| caps.unset_headless(),

@@ -8,8 +8,7 @@ mod common;
 async fn custom_termination_with_timeouts() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    // NOTE: Using beta channel as stable channel chromedriver was bugged on Linux...
-    let chromedriver = Chromedriver::run_latest_beta().await?;
+    let chromedriver = Chromedriver::run(ChromedriverRunConfig::default()).await?;
 
     chromedriver
         .with_session(common::wikipedia::test_wikipedia)

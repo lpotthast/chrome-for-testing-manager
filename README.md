@@ -2,10 +2,10 @@
 
 Programmatic management of **chrome-for-testing** installations.
 
-- Automatically resolves the requested version. `Chromedriver::run_latest_stable` is a shortcut for
-  `Chromedriver::run(VersionRequest::LatestIn(Channel::Stable), PortRequest::Any)`.
+- Automatically resolves the configured Chrome for Testing version.
 - Automatically downloads chrome-for-testing `chrome` and `chromedriver` binaries into a local cache directory.
 - Possibility to spawn the chromedriver process using a random port.
+- Optional line-based listener for chromedriver stdout/stderr during a run.
 - Built-int session management.
 
 Frees you from the need to
@@ -19,7 +19,7 @@ Frees you from the need to
 
 ```toml
 [dependencies]
-chrome-for-testing-manager = { version = "0.8", features = ["thirtyfour"] }
+chrome-for-testing-manager = "0.9"
 rootcause = "0.12"
 thirtyfour = "0.36"
 
@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use assertr::prelude::*;
-use chrome_for_testing_manager::{ChromeForTestingManagerError, Chromedriver};
+use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
 use rootcause::Report;
 use std::time::Duration;
 use thirtyfour::prelude::*;
@@ -41,11 +41,11 @@ use thirtyfour::prelude::*;
 // If you want to run a test, use: `#[tokio::test(flavor = "multi_thread")]`.
 #[tokio::main]
 async fn main() -> Result<(), Report> {
-    Chromedriver::run_latest_stable()
+    Chromedriver::run(ChromedriverRunConfig::default())
         .await?
         .with_session(async |session| {
             session.goto("https://wikipedia.org").await?;
-          
+
             let search_form = session.find(By::Id("search-form")).await?;
             let search_input = search_form.find(By::Id("searchInput")).await?;
             search_input.send_keys("selenium").await?;
@@ -65,6 +65,20 @@ async fn main() -> Result<(), Report> {
         }).await
 }
 ```
+
+## Managed sessions opt-out
+
+The `with_session` function. providing a `thirtyfour` session, called in the example, was only available because
+`chrome-for-testing-manager` enables its `thirtyfour` feature by default.
+
+If you just want it's chrome/chromedriver version resolution, download and launch orchestration, declare the dependency
+as
+
+```toml
+chrome-for-testing-manager = { version = "0.9", default-features = false }
+```
+
+instead.
 
 ## MSRV
 

@@ -10,8 +10,7 @@ mod common;
 async fn multiple_sessions() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    // NOTE: Using beta channel as stable channel chromedriver was bugged on Linux...
-    let chromedriver = Arc::new(Chromedriver::run_latest_beta().await?);
+    let chromedriver = Arc::new(Chromedriver::run(ChromedriverRunConfig::default()).await?);
 
     let mut tests = JoinSet::new();
     for _ in 0..5 {

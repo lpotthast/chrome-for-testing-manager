@@ -6,7 +6,7 @@ use rootcause::Report;
 async fn unusable_on_non_multithreaded_runtime() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    assert_that!(Chromedriver::run_latest_beta().await)
+    assert_that!(Chromedriver::run(ChromedriverRunConfig::default()).await)
         .is_err()
         .derive(|it| it.to_string())
         .contains("chromedriver requires a multi-threaded Tokio runtime")

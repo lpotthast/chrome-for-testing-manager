@@ -1,6 +1,6 @@
 [package]
 name = "chrome-for-testing-manager"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.89.0"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
@@ -15,6 +15,7 @@ authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
 exclude = [".claude", ".idea", ".vscode", "AGENTS.md", "CLAUDE.md", "Justfile"]
 
 [features]
+default = ["thirtyfour"]
 thirtyfour = ["dep:thirtyfour"]
 
 [dependencies]
@@ -28,6 +29,7 @@ thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["fs", "process", "time"] }
 tokio-process-tools = "0.8.1"
 tracing = "0.1.41"
+typed-builder = "0.23.2"
 zip = { version = "8.0.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

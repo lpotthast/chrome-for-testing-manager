@@ -1,7 +1,8 @@
 use crate::ChromeForTestingManagerError;
-use crate::mgr::{ChromeForTestingManager, LoadedChromePackage};
-use crate::output::{ChromedriverRunConfig, DriverOutputInspectors};
-use crate::port::Port;
+use crate::mgr::{ChromeForTestingManager, LoadedChromePackage, VersionRequest};
+use crate::output::{DriverOutputInspectors, DriverOutputListener};
+use crate::port::{Port, PortRequest};
+use chrome_for_testing::Channel;
 use rootcause::prelude::ResultExt;
 #[cfg(feature = "thirtyfour")]
 use rootcause::{IntoReportCollection, markers::SendSync};
@@ -12,6 +13,29 @@ use std::time::Duration;
 use tokio::runtime::RuntimeFlavor;
 use tokio_process_tools::TerminateOnDrop;
 use tokio_process_tools::broadcast::BroadcastOutputStream;
+use typed_builder::TypedBuilder;
+
+/// Configuration used when running a `ChromeDriver` process.
+#[derive(Debug, Clone, TypedBuilder)]
+pub struct ChromedriverRunConfig {
+    /// The requested `ChromeDriver` version.
+    #[builder(default = VersionRequest::LatestIn(Channel::Stable))]
+    pub version: VersionRequest,
+
+    /// The requested `ChromeDriver` port.
+    #[builder(default = PortRequest::Any)]
+    pub port: PortRequest,
+
+    /// Optional callback for browser-driver process output lines.
+    #[builder(default, setter(strip_option(fallback = output_listener_opt)))]
+    pub output_listener: Option<DriverOutputListener>,
+}
+
+impl Default for ChromedriverRunConfig {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
 
 /// A wrapper struct for a spawned chromedriver process.
 /// Keep this alive until your test is complete.
@@ -49,6 +73,49 @@ impl Debug for Chromedriver {
             .field("output_inspectors", &self.output_inspectors)
             .field("port", &self.port)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assertr::prelude::*;
+
+    #[test]
+    fn run_config_defaults_to_latest_stable_on_any_port() {
+        let config = ChromedriverRunConfig::builder().build();
+
+        assert_that!(config.version).is_equal_to(VersionRequest::LatestIn(Channel::Stable));
+        assert_that!(config.port).is_equal_to(PortRequest::Any);
+        assert_that!(config.output_listener).is_none();
+    }
+
+    #[test]
+    fn run_config_accepts_bare_output_listener() {
+        let listener = DriverOutputListener::new(|_line| {});
+
+        let config = ChromedriverRunConfig::builder()
+            .output_listener(listener)
+            .build();
+
+        assert_that!(config.output_listener).is_some();
+    }
+
+    #[test]
+    fn run_config_accepts_optional_output_listener() {
+        let listener = DriverOutputListener::new(|_line| {});
+
+        let config = ChromedriverRunConfig::builder()
+            .output_listener_opt(Some(listener))
+            .build();
+
+        assert_that!(config.output_listener).is_some();
+
+        let config = ChromedriverRunConfig::builder()
+            .output_listener_opt(None)
+            .build();
+
+        assert_that!(config.output_listener).is_none();
     }
 }
 

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-04-14
+
+### Changed
+
+- Preserve the bare `output_listener(DriverOutputListener)` builder setter and add
+  `output_listener_opt(Option<DriverOutputListener>)`.
+- Move `ChromedriverRunConfig` from the output module to the ChromeDriver module.
+
 ## [0.9.0] - 2026-04-14
 
 ### Added
@@ -182,7 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
-[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.9.1...HEAD
+
+[0.9.1]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.9.0...0.9.1
 
 [0.9.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.8.0...0.9.0
 

@@ -2,12 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::mgr::VersionRequest;
-use crate::port::PortRequest;
-use chrome_for_testing::Channel;
 use tokio_process_tools::broadcast::BroadcastOutputStream;
 use tokio_process_tools::{Inspector, LineParsingOptions, Next, ProcessHandle};
-use typed_builder::TypedBuilder;
 
 /// The browser-driver output stream source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,28 +56,6 @@ impl DriverOutputListener {
 
     pub(crate) fn emit(&self, line: DriverOutputLine) {
         (self.on_line)(line);
-    }
-}
-
-/// Configuration used when running a `ChromeDriver` process.
-#[derive(Debug, Clone, TypedBuilder)]
-pub struct ChromedriverRunConfig {
-    /// The requested `ChromeDriver` version.
-    #[builder(default = VersionRequest::LatestIn(Channel::Stable))]
-    pub version: VersionRequest,
-
-    /// The requested `ChromeDriver` port.
-    #[builder(default = PortRequest::Any)]
-    pub port: PortRequest,
-
-    /// Optional callback for browser-driver process output lines.
-    #[builder(default, setter(strip_option))]
-    pub output_listener: Option<DriverOutputListener>,
-}
-
-impl Default for ChromedriverRunConfig {
-    fn default() -> Self {
-        Self::builder().build()
     }
 }
 
@@ -178,14 +152,5 @@ mod tests {
             sequence: 0,
             line: "ready".to_owned(),
         }]);
-    }
-
-    #[test]
-    fn run_config_defaults_to_latest_stable_on_any_port() {
-        let config = ChromedriverRunConfig::builder().build();
-
-        assert_that!(config.version).is_equal_to(VersionRequest::LatestIn(Channel::Stable));
-        assert_that!(config.port).is_equal_to(PortRequest::Any);
-        assert_that!(config.output_listener).is_none();
     }
 }

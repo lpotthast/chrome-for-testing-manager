@@ -12,12 +12,10 @@ pub(crate) mod session;
 
 pub use chrome_for_testing::Channel;
 pub use chrome_for_testing::Version;
-pub use chromedriver::Chromedriver;
+pub use chromedriver::{Chromedriver, ChromedriverRunConfig};
 pub use error::{ChromeForTestingArtifact, ChromeForTestingManagerError};
 pub use mgr::{ChromeForTestingManager, VersionRequest};
-pub use output::{
-    ChromedriverRunConfig, DriverOutputLine, DriverOutputListener, DriverOutputSource,
-};
+pub use output::{DriverOutputLine, DriverOutputListener, DriverOutputSource};
 pub use port::{Port, PortRequest};
 #[cfg(any(feature = "thirtyfour"))]
 pub use session::Session;

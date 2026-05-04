@@ -8,12 +8,26 @@ use std::{
 use thiserror::Error;
 use tokio::runtime::RuntimeFlavor;
 
+/// Convenience alias for `Result<T, rootcause::Report<ChromeForTestingManagerError>>`.
+///
+/// Use this in your application's signatures to avoid spelling out the wrapped error type:
+///
+/// ```no_run
+/// use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig, Result};
+///
+/// async fn launch() -> Result<Chromedriver> {
+///     Chromedriver::run(ChromedriverRunConfig::default()).await
+/// }
+/// ```
+pub type Result<T> = std::result::Result<T, rootcause::Report<ChromeForTestingManagerError>>;
+
 /// The chrome-for-testing artifact involved in an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChromeForTestingArtifact {
     /// The Chrome browser binary package.
     Chrome,
+
     /// The Chromedriver package.
     ChromeDriver,
 }

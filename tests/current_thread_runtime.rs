@@ -1,5 +1,7 @@
+//! Verifies that [`Chromedriver::run`] rejects current-thread Tokio runtimes with a useful error.
+
 use assertr::prelude::*;
-use chrome_for_testing_manager::*;
+use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
 use rootcause::Report;
 
 #[tokio::test]
@@ -8,7 +10,7 @@ async fn unusable_on_non_multithreaded_runtime() -> Result<(), Report> {
 
     assert_that!(Chromedriver::run(ChromedriverRunConfig::default()).await)
         .is_err()
-        .derive(|it| it.to_string())
+        .derive(ToString::to_string)
         .contains("chromedriver requires a multi-threaded Tokio runtime")
         .contains("detected CurrentThread");
 

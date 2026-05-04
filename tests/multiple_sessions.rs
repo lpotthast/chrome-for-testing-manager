@@ -1,5 +1,8 @@
+//! Verifies that multiple `WebDriver` sessions can run concurrently against a single shared
+//! [`Chromedriver`].
+
 use assertr::prelude::*;
-use chrome_for_testing_manager::*;
+use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
 use rootcause::Report;
 use std::sync::Arc;
 use tokio::task::JoinSet;

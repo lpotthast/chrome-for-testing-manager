@@ -10,17 +10,19 @@ impl CacheDir {
     pub fn get_or_create() -> Result<Self, Report<ChromeForTestingManagerError>> {
         let project_dirs = directories::ProjectDirs::from("", "", "chrome-for-testing-manager")
             .context(ChromeForTestingManagerError::DetermineCacheDir)?;
-
         let cache_dir = project_dirs.cache_dir();
+        Self::create_at(cache_dir.to_owned())
+    }
+
+    pub fn create_at(cache_dir: PathBuf) -> Result<Self, Report<ChromeForTestingManagerError>> {
         if !cache_dir.exists() {
-            std::fs::create_dir_all(cache_dir).context(
+            std::fs::create_dir_all(&cache_dir).context(
                 ChromeForTestingManagerError::CreateCacheDir {
-                    cache_dir: cache_dir.to_owned(),
+                    cache_dir: cache_dir.clone(),
                 },
             )?;
         }
-
-        Ok(Self(cache_dir.to_owned()))
+        Ok(Self(cache_dir))
     }
 
     pub fn path(&self) -> &PathBuf {

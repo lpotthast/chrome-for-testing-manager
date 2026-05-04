@@ -1,4 +1,6 @@
-use chrome_for_testing_manager::*;
+//! Exercises the explicit [`Chromedriver::terminate`] path (rather than relying on drop).
+
+use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
 use rootcause::Report;
 
 mod common;

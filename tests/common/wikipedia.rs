@@ -1,5 +1,5 @@
 use assertr::prelude::*;
-use chrome_for_testing_manager::*;
+use chrome_for_testing_manager::Session;
 use rootcause::Report;
 use std::time::Duration;
 use thirtyfour::prelude::*;

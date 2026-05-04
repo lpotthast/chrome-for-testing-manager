@@ -2,11 +2,9 @@ use crate::cache::CacheDir;
 use crate::download;
 use crate::output::{DriverOutputInspectors, DriverOutputListener};
 use crate::port::{Port, PortRequest};
+use crate::version::{SelectedVersion, VersionRequest};
 use crate::{ChromeForTestingArtifact, ChromeForTestingManagerError};
-use chrome_for_testing::{
-    Channel, Download, KnownGoodVersions, LastKnownGoodVersions, Platform, Version,
-    VersionInChannel, VersionWithoutChannel,
-};
+use chrome_for_testing::{KnownGoodVersions, LastKnownGoodVersions, Platform, Version};
 use rootcause::{Report, bail, option_ext::OptionExt, prelude::ResultExt, report};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,63 +12,51 @@ use std::sync::atomic::AtomicU16;
 use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
-use tokio_process_tools::broadcast::BroadcastOutputStream;
-use tokio_process_tools::{LineParsingOptions, Process, ProcessHandle, WaitForLineResult};
+use tokio_process_tools::{
+    BroadcastOutputStream, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_MAX_LINE_LENGTH,
+    DEFAULT_READ_CHUNK_SIZE, LineOverflowBehavior, LineParsingOptions, NumBytesExt, Process,
+    ProcessHandle, ReliableDelivery, ReplayEnabled, WaitForLineResult,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VersionRequest {
-    /// Uses the latest working version. Might not be stable yet.
-    /// You may want to prefer variant [`VersionRequest::LatestIn`] instead.
-    Latest,
-
-    /// Use the latest release from the given [`Channel`],
-    /// e.g. the one from the [`Channel::Stable`] channel.
-    LatestIn(Channel),
-
-    /// Pin a specific version to use.
-    Fixed(Version),
-}
-
-#[derive(Debug)]
-pub struct SelectedVersion {
-    channel: Option<Channel>,
-    version: Version,
-    chrome: Option<Download>,
-    chromedriver: Option<Download>,
-}
-
-impl From<(VersionWithoutChannel, Platform)> for SelectedVersion {
-    fn from((v, p): (VersionWithoutChannel, Platform)) -> Self {
-        SelectedVersion {
-            channel: None,
-            version: v.version,
-            chrome: v.downloads.chrome_for_platform(p).cloned(),
-            chromedriver: v.downloads.chromedriver_for_platform(p).cloned(),
-        }
-    }
-}
-
-impl From<(VersionInChannel, Platform)> for SelectedVersion {
-    fn from((v, p): (VersionInChannel, Platform)) -> Self {
-        let chrome_download = v.downloads.chrome_for_platform(p).cloned();
-        let chromedriver_download = v.downloads.chromedriver_for_platform(p).cloned();
-
-        SelectedVersion {
-            channel: Some(v.channel),
-            version: v.version,
-            chrome: chrome_download,
-            chromedriver: chromedriver_download,
-        }
-    }
-}
-
+/// A downloaded Chrome and `ChromeDriver` pair, with their on-disk executable paths resolved.
+///
+/// Returned by [`ChromeForTestingManager::download`]. Hand it to
+/// [`ChromeForTestingManager::launch_chromedriver`] or [`ChromeForTestingManager::prepare_caps`]
+/// to drive a browser session.
 #[derive(Debug)]
 pub struct LoadedChromePackage {
-    #[allow(dead_code)] // Used in `prepare_caps` when the `thirtyfour` feature is enabled.
     chrome_executable: PathBuf,
     chromedriver_executable: PathBuf,
 }
 
+impl LoadedChromePackage {
+    /// Path to the cached Chrome browser executable.
+    #[must_use]
+    pub fn chrome_executable(&self) -> &std::path::Path {
+        &self.chrome_executable
+    }
+
+    /// Path to the cached `ChromeDriver` executable.
+    #[must_use]
+    pub fn chromedriver_executable(&self) -> &std::path::Path {
+        &self.chromedriver_executable
+    }
+}
+
+/// Lower-level orchestrator for chrome-for-testing artifacts.
+///
+/// Most users should use [`crate::Chromedriver`], which wraps this manager with sensible defaults
+/// and handles process lifecycle automatically. Reach for `ChromeForTestingManager` directly when
+/// you need finer control:
+///
+/// - **Pre-warm a cache** without spawning chromedriver: call [`Self::resolve_version`] and
+///   [`Self::download`], then drop the result.
+/// - **Run multiple chromedriver instances** off a single resolved version: call
+///   [`Self::launch_chromedriver`] repeatedly with the same `LoadedChromePackage`.
+/// - **Inspect or modify the resolved version** before downloading (channel, available platforms).
+/// - **Pin a custom cache directory** via [`Self::new_with_cache_dir`] (useful in CI).
+/// - **Drive sessions through a non-`thirtyfour`** `WebDriver` client by using the chromedriver
+///   process and port directly.
 #[derive(Debug)]
 pub struct ChromeForTestingManager {
     client: reqwest::Client,
@@ -79,6 +65,8 @@ pub struct ChromeForTestingManager {
 }
 
 impl ChromeForTestingManager {
+    /// Create a manager that uses the platform-default cache directory.
+    ///
     /// # Errors
     ///
     /// Returns an error if the current platform is unsupported or the cache directory
@@ -87,6 +75,25 @@ impl ChromeForTestingManager {
         Ok(Self {
             client: reqwest::Client::new(),
             cache_dir: CacheDir::get_or_create()?,
+            platform: Platform::detect()
+                .context(ChromeForTestingManagerError::UnsupportedPlatform)?,
+        })
+    }
+
+    /// Create a manager that caches downloaded artifacts under `cache_dir`.
+    ///
+    /// The directory is created if it does not exist. Useful in CI to share the cache across
+    /// runs, or to keep artifacts out of the user-default cache location.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current platform is unsupported or the directory cannot be created.
+    pub fn new_with_cache_dir(
+        cache_dir: PathBuf,
+    ) -> Result<Self, Report<ChromeForTestingManagerError>> {
+        Ok(Self {
+            client: reqwest::Client::new(),
+            cache_dir: CacheDir::create_at(cache_dir)?,
             platform: Platform::detect()
                 .context(ChromeForTestingManagerError::UnsupportedPlatform)?,
         })
@@ -103,7 +110,16 @@ impl ChromeForTestingManager {
         self.cache_dir.clear().await
     }
 
-    pub(crate) async fn resolve_version(
+    /// Resolve a [`VersionRequest`] against the chrome-for-testing release index.
+    ///
+    /// Returns a [`SelectedVersion`] suitable for [`Self::download`]. No artifacts are downloaded
+    /// at this point; this only performs the HTTP requests needed to determine which version to
+    /// fetch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the version manifest cannot be fetched or no matching version exists.
+    pub async fn resolve_version(
         &self,
         version_selection: VersionRequest,
     ) -> Result<SelectedVersion, Report<ChromeForTestingManagerError>> {
@@ -151,7 +167,15 @@ impl ChromeForTestingManager {
         Ok(selected)
     }
 
-    pub(crate) async fn download(
+    /// Download Chrome and `ChromeDriver` for `selected` into the cache directory.
+    ///
+    /// If both binaries already exist on disk this is a no-op and returns the cached paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no platform-matching download exists, the cache directory cannot be
+    /// prepared, or the download / extraction fails.
+    pub async fn download(
         &self,
         selected: SelectedVersion,
     ) -> Result<LoadedChromePackage, Report<ChromeForTestingManagerError>> {
@@ -234,14 +258,32 @@ impl ChromeForTestingManager {
         })
     }
 
-    pub(crate) async fn launch_chromedriver(
+    /// Launch a chromedriver process from `loaded` on the requested port.
+    ///
+    /// Returns the spawned process handle, the actual bound port (relevant when
+    /// [`PortRequest::Any`] was used), and the long-lived output inspectors that drive the
+    /// optional [`DriverOutputListener`]. Keep the inspectors alive while you want to receive
+    /// output lines.
+    ///
+    /// The returned [`ProcessHandle`] is not auto-terminated; either wrap it with
+    /// [`ProcessHandle::terminate_on_drop`] or call its `terminate` method explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chromedriver binary cannot be spawned or does not report
+    /// successful startup within 10 seconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chromedriver executable path contains non-Unicode bytes.
+    pub async fn launch_chromedriver(
         &self,
         loaded: &LoadedChromePackage,
         port: PortRequest,
         output_listener: Option<DriverOutputListener>,
     ) -> Result<
         (
-            ProcessHandle<BroadcastOutputStream>,
+            ProcessHandle<BroadcastOutputStream<ReliableDelivery, ReplayEnabled>>,
             Port,
             DriverOutputInspectors,
         ),
@@ -269,8 +311,16 @@ impl ChromeForTestingManager {
         self.apply_chromedriver_creation_flags(&mut command);
 
         let mut chromedriver_process = Process::new(command)
-            .with_name("chromedriver")
-            .spawn_broadcast()
+            .name("chromedriver")
+            .stdout_and_stderr(|stream| {
+                stream
+                    .broadcast()
+                    .reliable_for_active_subscribers()
+                    .replay_last_bytes(1.megabytes())
+                    .read_chunk_size(DEFAULT_READ_CHUNK_SIZE)
+                    .max_buffered_chunks(DEFAULT_MAX_BUFFERED_CHUNKS)
+            })
+            .spawn()
             .context(ChromeForTestingManagerError::SpawnChromedriver {
                 path: loaded.chromedriver_executable.clone(),
             })?;
@@ -283,7 +333,8 @@ impl ChromeForTestingManager {
         let started_on_port_clone = started_on_port.clone();
         let startup_result = chromedriver_process
             .stdout()
-            .wait_for_line_with_timeout(
+            .wait_for_line(
+                Duration::from_secs(10),
                 move |line| {
                     if line.contains("started successfully on port") {
                         let Some(port) = line
@@ -305,10 +356,16 @@ impl ChromeForTestingManager {
                         false
                     }
                 },
-                LineParsingOptions::default(),
-                Duration::from_secs(10),
+                LineParsingOptions::builder()
+                    .max_line_length(DEFAULT_MAX_LINE_LENGTH)
+                    .overflow_behavior(LineOverflowBehavior::DropAdditionalData)
+                    .buffer_compaction_threshold(None)
+                    .build(),
             )
-            .await;
+            .await
+            .context(ChromeForTestingManagerError::WaitForChromedriverStartup {
+                path: loaded.chromedriver_executable.clone(),
+            })?;
         match startup_result {
             WaitForLineResult::Matched => {}
             WaitForLineResult::StreamClosed | WaitForLineResult::Timeout => {
@@ -363,9 +420,22 @@ impl ChromeForTestingManager {
         command
     }
 
+    /// Prepare a [`thirtyfour::ChromeCapabilities`] pre-wired with the loaded Chrome binary path
+    /// and the headless flag set.
+    ///
+    /// Useful when constructing a [`thirtyfour::WebDriver`] manually instead of using
+    /// [`crate::Chromedriver::with_session`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying capability setup fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cached Chrome executable path contains non-Unicode bytes.
     #[cfg(feature = "thirtyfour")]
     #[allow(clippy::unused_self)] // Takes &self for API consistency with other methods.
-    pub(crate) fn prepare_caps(
+    pub fn prepare_caps(
         &self,
         loaded: &LoadedChromePackage,
     ) -> Result<thirtyfour::ChromeCapabilities, Report<ChromeForTestingManagerError>> {
@@ -399,7 +469,7 @@ mod tests {
     use serial_test::serial;
     use std::time::Duration;
 
-    #[ctor::ctor]
+    #[ctor::ctor(unsafe)]
     fn init_test_tracing() {
         tracing_subscriber::fmt().with_test_writer().try_init().ok();
     }

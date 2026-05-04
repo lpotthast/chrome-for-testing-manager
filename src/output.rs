@@ -2,8 +2,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio_process_tools::broadcast::BroadcastOutputStream;
-use tokio_process_tools::{Inspector, LineParsingOptions, Next, ProcessHandle};
+use tokio_process_tools::{
+    BroadcastOutputStream, Consumer, Delivery, LineParsingOptions, Next, ProcessHandle, Replay,
+    ReliableDelivery, ReplayEnabled,
+};
 
 /// The browser-driver output stream source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,9 +61,17 @@ impl DriverOutputListener {
     }
 }
 
-pub(crate) struct DriverOutputInspectors {
-    stdout: Inspector,
-    stderr: Inspector,
+/// Long-lived line-inspecting [`Consumer`] handles for the chromedriver process's stdout and
+/// stderr streams.
+///
+/// Returned from [`crate::ChromeForTestingManager::launch_chromedriver`] alongside the process
+/// handle and the bound port. Keep this value alive for as long as you want the configured
+/// [`DriverOutputListener`] to receive lines; dropping it stops the listeners. When using the
+/// high-level [`crate::Chromedriver`] entry point the inspectors are owned for you and dropped
+/// when the chromedriver process is terminated.
+pub struct DriverOutputInspectors {
+    stdout: Consumer<()>,
+    stderr: Consumer<()>,
 }
 
 impl fmt::Debug for DriverOutputInspectors {
@@ -75,7 +85,7 @@ impl fmt::Debug for DriverOutputInspectors {
 
 impl DriverOutputInspectors {
     pub(crate) fn start(
-        process: &ProcessHandle<BroadcastOutputStream>,
+        process: &ProcessHandle<BroadcastOutputStream<ReliableDelivery, ReplayEnabled>>,
         listener: Option<DriverOutputListener>,
     ) -> Self {
         let sequence = Arc::new(AtomicU64::new(0));
@@ -96,12 +106,16 @@ impl DriverOutputInspectors {
     }
 }
 
-fn inspect_output(
-    stream: &BroadcastOutputStream,
+fn inspect_output<D, R>(
+    stream: &BroadcastOutputStream<D, R>,
     source: DriverOutputSource,
     sequence: Arc<AtomicU64>,
     listener: Option<DriverOutputListener>,
-) -> Inspector {
+) -> Consumer<()>
+where
+    D: Delivery,
+    R: Replay,
+{
     stream.inspect_lines(
         move |line| {
             let line_ref: &str = &line;

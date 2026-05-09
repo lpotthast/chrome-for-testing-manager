@@ -14,59 +14,40 @@ use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::runtime::RuntimeFlavor;
 use tokio_process_tools::{
-    BroadcastOutputStream, ReliableDelivery, ReplayEnabled, TerminateOnDrop,
+    BroadcastOutputStream, GracefulShutdown, ReliableWithBackpressure, ReplayEnabled,
+    TerminateOnDrop,
 };
 use typed_builder::TypedBuilder;
 
-/// Timeouts used when terminating the spawned chromedriver process.
-///
-/// `interrupt` is the grace period the process gets to exit after receiving SIGINT (or the
-/// platform equivalent); `terminate` is the additional grace period after escalating to SIGTERM.
-/// Both default to 3 seconds.
-///
-/// ```
-/// # use chrome_for_testing_manager::TerminationTimeouts;
-/// # use std::time::Duration;
-/// let timeouts = TerminationTimeouts::builder()
-///     .interrupt(Duration::from_secs(5))
-///     .terminate(Duration::from_secs(5))
-///     .build();
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TypedBuilder)]
-pub struct TerminationTimeouts {
-    /// Grace period after the initial interrupt signal. Defaults to 3 seconds.
-    #[builder(default = Duration::from_secs(3))]
-    pub interrupt: Duration,
-
-    /// Grace period after escalating to terminate. Defaults to 3 seconds.
-    #[builder(default = Duration::from_secs(3))]
-    pub terminate: Duration,
-}
-
-impl Default for TerminationTimeouts {
-    fn default() -> Self {
-        Self::builder().build()
-    }
+/// Default per-platform graceful-shutdown budget used when terminating the spawned `chromedriver`
+/// process: 3 s `SIGTERM` on Unix (then `SIGKILL`) and 3 s `CTRL_BREAK_EVENT` on Windows (then
+/// `TerminateProcess`).
+#[must_use]
+pub(crate) fn default_graceful_shutdown() -> GracefulShutdown {
+    let timeout = Duration::from_secs(3);
+    GracefulShutdown::builder()
+        .unix_sigterm(timeout)
+        .windows_ctrl_break(timeout)
+        .build()
 }
 
 /// Configuration used when running a `ChromeDriver` process.
 ///
 /// Construct via [`Self::builder`] or [`Self::default`]. Defaults: latest stable Chrome,
-/// OS-assigned port, no output listener, default cache directory, 3 s / 3 s termination
-/// timeouts.
+/// OS-assigned port, no output listener, default cache directory, 3s graceful termination budget
+/// on all systems.
 ///
 /// ```no_run
-/// # use chrome_for_testing_manager::{Channel, ChromedriverRunConfig, DriverOutputListener,
-/// #     TerminationTimeouts};
+/// # use chrome_for_testing_manager::{Channel, ChromedriverRunConfig, DriverOutputListener, GracefulShutdown};
 /// # use std::time::Duration;
 /// let config = ChromedriverRunConfig::builder()
-///     .version(Channel::Stable)            // accepts Channel, Version, or VersionRequest
-///     .port(8080u16)                        // accepts u16, Port, or PortRequest
+///     .version(Channel::Stable)            // Accepts Channel, Version, or VersionRequest.
+///     .port(8080u16)                       // Accepts u16, Port, or PortRequest.
 ///     .output_listener(DriverOutputListener::new(|line| println!("{line:?}")))
-///     .termination_timeouts(
-///         TerminationTimeouts::builder()
-///             .interrupt(Duration::from_secs(5))
-///             .terminate(Duration::from_secs(5))
+///     .graceful_shutdown(
+///         GracefulShutdown::builder()
+///             .unix_sigterm(Duration::from_secs(3))
+///             .windows_ctrl_break(Duration::from_secs(3))
 ///             .build(),
 ///     )
 ///     .build();
@@ -95,10 +76,10 @@ pub struct ChromedriverRunConfig {
     #[builder(default, setter(strip_option(fallback = cache_dir_opt)))]
     pub cache_dir: Option<PathBuf>,
 
-    /// Timeouts applied when the [`Chromedriver`] handle is dropped or
-    /// [`Chromedriver::terminate`] is called.
-    #[builder(default)]
-    pub termination_timeouts: TerminationTimeouts,
+    /// Per-platform graceful-shutdown budget applied when the [`Chromedriver`] handle is dropped
+    /// or [`Chromedriver::terminate`] is called.
+    #[builder(default = default_graceful_shutdown())]
+    pub graceful_shutdown: GracefulShutdown,
 }
 
 impl Default for ChromedriverRunConfig {
@@ -109,8 +90,8 @@ impl Default for ChromedriverRunConfig {
 
 /// A handle to a spawned chromedriver process plus its resolved Chrome / `ChromeDriver` binaries.
 ///
-/// Terminates automatically when dropped, using the timeouts configured via
-/// [`ChromedriverRunConfig::termination_timeouts`]. The on-drop automation keeps tests safe in the
+/// Terminates automatically when dropped, using the budget configured via
+/// [`ChromedriverRunConfig::graceful_shutdown`]. The on-drop automation keeps tests safe in the
 /// face of panics. Call [`Self::terminate`] to drive the same shutdown explicitly and surface any
 /// error.
 ///
@@ -128,7 +109,8 @@ pub struct Chromedriver {
     ///
     /// Always stores a process handle. The value is only taken out on termination,
     /// notifying our `Drop` impl that the process was gracefully terminated when seeing `None`.
-    process: Option<TerminateOnDrop<BroadcastOutputStream<ReliableDelivery, ReplayEnabled>>>,
+    process:
+        Option<TerminateOnDrop<BroadcastOutputStream<ReliableWithBackpressure, ReplayEnabled>>>,
 
     /// Long-lived browser-driver output inspectors.
     output_inspectors: Option<DriverOutputInspectors>,
@@ -136,8 +118,8 @@ pub struct Chromedriver {
     /// The port the chromedriver process listens on.
     port: Port,
 
-    /// Timeouts to use when terminating, including on drop.
-    termination_timeouts: TerminationTimeouts,
+    /// Graceful-shutdown budget to use when terminating, including on drop.
+    graceful_shutdown: GracefulShutdown,
 }
 
 impl Debug for Chromedriver {
@@ -148,7 +130,7 @@ impl Debug for Chromedriver {
             .field("process", &self.process)
             .field("output_inspectors", &self.output_inspectors)
             .field("port", &self.port)
-            .field("termination_timeouts", &self.termination_timeouts)
+            .field("graceful_shutdown", &self.graceful_shutdown)
             .finish()
     }
 }
@@ -193,20 +175,22 @@ impl Chromedriver {
         };
         let selected = mgr.resolve_version(config.version).await?;
         let loaded = mgr.download(selected).await?;
+        let graceful_shutdown = config.graceful_shutdown;
         let (process_handle, actual_port, output_inspectors) = mgr
-            .launch_chromedriver(&loaded, config.port, config.output_listener)
+            .launch_chromedriver(
+                &loaded,
+                config.port,
+                config.output_listener,
+                graceful_shutdown.clone(),
+            )
             .await?;
-        let termination_timeouts = config.termination_timeouts;
         Ok(Chromedriver {
-            process: Some(process_handle.terminate_on_drop(
-                termination_timeouts.interrupt,
-                termination_timeouts.terminate,
-            )),
+            process: Some(process_handle.terminate_on_drop(graceful_shutdown.clone())),
             output_inspectors: Some(output_inspectors),
             port: actual_port,
             loaded,
             mgr,
-            termination_timeouts,
+            graceful_shutdown,
         })
     }
 
@@ -218,24 +202,20 @@ impl Chromedriver {
         self.port
     }
 
-    /// Gracefully terminate the chromedriver process with the configured termination timeouts
-    /// (defaults to 3s / 3s; configurable via the `termination_timeouts` field of
-    /// [`ChromedriverRunConfig`]).
+    /// Gracefully terminate the chromedriver process with the configured [`GracefulShutdown`],
+    /// configurable via the `graceful_shutdown` field of [`ChromedriverRunConfig`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the process cannot be terminated within the timeout.
+    /// Returns an error if the process cannot be terminated within the configured graceful-shutdown
+    /// budget.
     #[expect(clippy::missing_panics_doc)] // Process handle is always present; only taken here.
     pub async fn terminate(mut self) -> Result<ExitStatus, Report<ChromeForTestingManagerError>> {
-        let TerminationTimeouts {
-            interrupt,
-            terminate,
-        } = self.termination_timeouts;
         let _output_inspectors = self.output_inspectors.take();
         self.process
             .take()
             .expect("present")
-            .terminate(interrupt, terminate)
+            .terminate(self.graceful_shutdown)
             .await
             .context(ChromeForTestingManagerError::TerminateChromedriver { port: self.port })
     }
@@ -381,33 +361,26 @@ mod tests {
     }
 
     #[test]
-    fn builder_accepts_cache_dir_and_termination_timeouts() {
-        let timeouts = TerminationTimeouts::builder()
-            .interrupt(Duration::from_secs(1))
-            .terminate(Duration::from_secs(2))
+    fn builder_accepts_cache_dir_and_graceful_shutdown() {
+        let shutdown = GracefulShutdown::builder()
+            .unix_sigterm(Duration::from_secs(1))
+            .windows_ctrl_break(Duration::from_secs(2))
             .build();
         let config = ChromedriverRunConfig::builder()
             .cache_dir(PathBuf::from("/tmp/cft-cache"))
-            .termination_timeouts(timeouts)
+            .graceful_shutdown(shutdown.clone())
             .build();
 
         assert_that!(config.cache_dir).is_equal_to(Some(PathBuf::from("/tmp/cft-cache")));
-        assert_that!(config.termination_timeouts).is_equal_to(timeouts);
+        assert_that!(config.graceful_shutdown).is_equal_to(shutdown);
     }
 
     #[test]
-    fn termination_timeouts_builder_uses_three_second_defaults_for_unset_fields() {
-        let timeouts = TerminationTimeouts::builder()
-            .interrupt(Duration::from_secs(7))
+    fn default_graceful_shutdown_uses_three_second_sigterm_and_ctrl_break() {
+        let expected = GracefulShutdown::builder()
+            .unix_sigterm(Duration::from_secs(3))
+            .windows_ctrl_break(Duration::from_secs(3))
             .build();
-        assert_that!(timeouts.interrupt).is_equal_to(Duration::from_secs(7));
-        assert_that!(timeouts.terminate).is_equal_to(Duration::from_secs(3));
-    }
-
-    #[test]
-    fn termination_timeouts_default_is_three_seconds_each() {
-        let timeouts = TerminationTimeouts::default();
-        assert_that!(timeouts.interrupt).is_equal_to(Duration::from_secs(3));
-        assert_that!(timeouts.terminate).is_equal_to(Duration::from_secs(3));
+        assert_that!(default_graceful_shutdown()).is_equal_to(expected);
     }
 }

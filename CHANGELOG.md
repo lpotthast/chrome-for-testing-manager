@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `PortRequest::Any` was used to let the OS pick a free port).
 - `ChromedriverRunConfig` now has a `cache_dir: Option<PathBuf>` field for overriding the cache directory used for
   downloaded `chrome` / `chromedriver` artifacts. Defaults to the platform's user-owned cache directory.
-- `ChromedriverRunConfig` now has a `termination_timeouts: TerminationTimeouts` field for configuring the on-drop and
-  on-terminate timeouts, defaulting to the (previously non-changeable) 3s interrupt and 3s terminate timeouts.
-- New public `TerminationTimeouts` struct with `interrupt: Duration` and `terminate: Duration` fields, constructed
-  via `TerminationTimeouts::builder()` (`TypedBuilder`-derived; both fields default to 3 seconds).
+- `ChromedriverRunConfig` now has a `graceful_shutdown: GracefulShutdown` field for configuring the on-drop and
+  on-terminate graceful termination budgets, defaulting to a single 3s timeout on all systems.
+- Re-export `tokio_process_tools::GracefulShutdown`, `GracefulShutdownBuilder`, `UnixGracefulPhase`,
+  `UnixGracefulShutdown`, `UnixGracefulSignal`, and `WindowsGracefulShutdown` from the crate root for constructing
+  the `graceful_shutdown` value.
 - `ChromeForTestingManager::new_with_cache_dir(PathBuf)` constructor for pinning a custom cache directory.
 - `From<u16>` and `From<Port>` impls for `PortRequest`. The builder's `port` field now uses `setter(into)`, so
   `.port(8080u16)` works without `PortRequest::Specific(Port(...))` wrapping.
@@ -27,38 +28,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `VersionRequest::LatestIn(...)` / `VersionRequest::Fixed(...)` wrapping.
 - Public `Result<T>` type alias for `std::result::Result<T, rootcause::Report<ChromeForTestingManagerError>>`.
 - Read accessors on `LoadedChromePackage`: `chrome_executable()` and `chromedriver_executable()`.
-- Read accessors on `SelectedVersion`: `channel()`, `version()`, `has_chrome_download()`,
-  `has_chromedriver_download()`.
+- Read accessors on `SelectedVersion`: `channel()`, `version()`, `has_chrome_download()`, `has_chromedriver_download()`.
 
 ### Changed
 
 - **Breaking:** Upgrade `thirtyfour` dependency to 0.37.0. Downstream code that uses `thirtyfour` types (e.g. via
   `with_custom_session`, the `Session` deref target, or `thirtyfour::prelude`) may need to follow upstreams 0.36 -> 0.37
   migration (see thirtyfour's `MIGRATION.md`).
-- Upgrade `tokio-process-tools` to 0.9.2.
+- **Breaking:** Upgrade `tokio-process-tools` to 0.11.0. The graceful-termination APIs now take a single per-platform
+  `GracefulShutdown` argument instead of two separate `Duration`s.
 - Upgrade `assertr` dev dependency to 0.6.0.
 - Upgrade `ctor` dev dependency to 1.0.0.
 - `ChromeForTestingManager::resolve_version`, `download`, `launch_chromedriver`, and `prepare_caps` are now `pub`
   (previously `pub(crate)`). `Chromedriver` remains the recommended entry point though. Reach for the lower-level
   manager when you need to pre-warm the cache, run multiple chromedriver instances off a single download, pin a custom
   cache directory, or drive sessions through a non-`thirtyfour` WebDriver client.
+- `ChromeForTestingManager::launch_chromedriver` now takes a `GracefulShutdown` argument. It is applied to the
+  internal cleanup that fires when chromedriver fails to report successful startup, so the budget configured on
+  `ChromedriverRunConfig::graceful_shutdown` is honored on the startup-failure path as well.
 - `DriverOutputInspectors` is now `pub` (previously `pub(crate)`); required when calling `launch_chromedriver`
   directly.
 - `LoadedChromePackage` and `SelectedVersion` are now re-exported from the crate root.
 - `with_custom_session` setup closure bound relaxed from `Fn` to `FnOnce`, so callers can move owned state into it.
-- `Chromedriver::terminate` now honors the configured `termination_timeouts`.
+- `Chromedriver::terminate` now honors the configured `graceful_shutdown` budget.
+- The internal browser-driver output stream now uses `tokio-process-tools`' `reliable_with_backpressure` policy. A
+  slow `DriverOutputListener` will backpressure `chromedriver`'s stdout/stderr. Keep listener callbacks non-blocking.
 - README introduction rewritten: new "Why use it" overview, a configuration snippet covering version pinning, fixed
-  ports, output listeners and termination timeouts, and a "Going lower-level" section describing
+  ports, output listeners and graceful shutdown, and a "Going lower-level" section describing
   `ChromeForTestingManager`. The example now uses `Chromedriver::run_default()`.
 
 ### Removed
 
 - **Breaking:** `Chromedriver::terminate_with_timeouts(interrupt, terminate)` has been removed. Configure the
-  per-call timeouts via `ChromedriverRunConfig::termination_timeouts` and call `Chromedriver::terminate()` instead.
+  shutdown via `ChromedriverRunConfig::graceful_shutdown` and call `Chromedriver::terminate()` instead.
   Migration: replace
   `chromedriver.terminate_with_timeouts(Duration::from_secs(1), Duration::from_secs(1)).await`
   with building the config via
-  `ChromedriverRunConfig::builder().termination_timeouts(TerminationTimeouts::builder().interrupt(...).terminate(...).build()).build()`
+  `ChromedriverRunConfig::builder().graceful_shutdown(GracefulShutdown::builder().unix_sigterm(Duration::from_secs(1)).windows_ctrl_break(Duration::from_secs(1)).build()).build()`
   and calling `chromedriver.terminate().await`.
 
 ## [0.9.1] - 2026-04-14

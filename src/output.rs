@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio_process_tools::{
-    BroadcastOutputStream, Consumer, Delivery, LineParsingOptions, Next, ProcessHandle, Replay,
-    ReliableDelivery, ReplayEnabled,
+    BroadcastOutputStream, Consumable, Consumer, Delivery, LineParsingOptions, Next, ParseLines,
+    ProcessHandle, ReliableWithBackpressure, Replay, ReplayEnabled,
 };
+use unwrap_infallible::UnwrapInfallible;
 
 /// The browser-driver output stream source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,6 +50,11 @@ impl fmt::Debug for DriverOutputListener {
 
 impl DriverOutputListener {
     /// Create a new browser-driver output listener from a callback.
+    ///
+    /// The callback runs synchronously on the line-consumption task and applies backpressure to
+    /// chromedriver's stdout / stderr. Keep it non-blocking: avoid blocking I/O, lock contention,
+    /// or unbounded work. Hand off to a channel or background task if you need to do real work
+    /// per line. Otherwise, a slow callback can stall chromedriver itself.
     #[must_use]
     pub fn new(on_line: impl Fn(DriverOutputLine) + Send + Sync + 'static) -> Self {
         Self {
@@ -85,7 +91,7 @@ impl fmt::Debug for DriverOutputInspectors {
 
 impl DriverOutputInspectors {
     pub(crate) fn start(
-        process: &ProcessHandle<BroadcastOutputStream<ReliableDelivery, ReplayEnabled>>,
+        process: &ProcessHandle<BroadcastOutputStream<ReliableWithBackpressure, ReplayEnabled>>,
         listener: Option<DriverOutputListener>,
     ) -> Self {
         let sequence = Arc::new(AtomicU64::new(0));
@@ -116,23 +122,25 @@ where
     D: Delivery,
     R: Replay,
 {
-    stream.inspect_lines(
-        move |line| {
-            let line_ref: &str = &line;
-            tracing::debug!(source = ?source, driver_output = line_ref, "driver log");
+    stream
+        .consume(ParseLines::inspect(
+            LineParsingOptions::default(),
+            move |line| {
+                let line_ref: &str = &line;
+                tracing::debug!(source = ?source, driver_output = line_ref, "driver log");
 
-            if let Some(listener) = &listener {
-                listener.emit(DriverOutputLine {
-                    source,
-                    sequence: sequence.fetch_add(1, Ordering::SeqCst),
-                    line: line.into_owned(),
-                });
-            }
+                if let Some(listener) = &listener {
+                    listener.emit(DriverOutputLine {
+                        source,
+                        sequence: sequence.fetch_add(1, Ordering::SeqCst),
+                        line: line.into_owned(),
+                    });
+                }
 
-            Next::Continue
-        },
-        LineParsingOptions::default(),
-    )
+                Next::Continue
+            },
+        ))
+        .unwrap_infallible()
 }
 
 #[cfg(test)]

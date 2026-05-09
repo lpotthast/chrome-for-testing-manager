@@ -14,8 +14,9 @@ use tokio::fs;
 use tokio::process::Command;
 use tokio_process_tools::{
     BroadcastOutputStream, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_MAX_LINE_LENGTH,
-    DEFAULT_READ_CHUNK_SIZE, LineOverflowBehavior, LineParsingOptions, NumBytesExt, Process,
-    ProcessHandle, ReliableDelivery, ReplayEnabled, WaitForLineResult,
+    DEFAULT_READ_CHUNK_SIZE, GracefulShutdown, LineOverflowBehavior, LineParsingOptions,
+    NumBytesExt, Process, ProcessHandle, ReliableWithBackpressure, ReplayEnabled,
+    WaitForLineResult,
 };
 
 /// A downloaded Chrome and `ChromeDriver` pair, with their on-disk executable paths resolved.
@@ -265,8 +266,11 @@ impl ChromeForTestingManager {
     /// optional [`DriverOutputListener`]. Keep the inspectors alive while you want to receive
     /// output lines.
     ///
-    /// The returned [`ProcessHandle`] is not auto-terminated; either wrap it with
-    /// [`ProcessHandle::terminate_on_drop`] or call its `terminate` method explicitly.
+    /// The returned [`ProcessHandle`] is not auto-terminated. Either wrap it with
+    /// [`ProcessHandle::terminate_on_drop`] or call its `terminate` method explicitly. The
+    /// `shutdown` argument is only used for the internal cleanup path that fires when
+    /// chromedriver fails to report successful startup. Pass the same value you intend to use
+    /// for graceful shutdown so a startup failure honors your tuned budget.
     ///
     /// # Errors
     ///
@@ -281,9 +285,10 @@ impl ChromeForTestingManager {
         loaded: &LoadedChromePackage,
         port: PortRequest,
         output_listener: Option<DriverOutputListener>,
+        shutdown: GracefulShutdown,
     ) -> Result<
         (
-            ProcessHandle<BroadcastOutputStream<ReliableDelivery, ReplayEnabled>>,
+            ProcessHandle<BroadcastOutputStream<ReliableWithBackpressure, ReplayEnabled>>,
             Port,
             DriverOutputInspectors,
         ),
@@ -315,7 +320,7 @@ impl ChromeForTestingManager {
             .stdout_and_stderr(|stream| {
                 stream
                     .broadcast()
-                    .reliable_for_active_subscribers()
+                    .reliable_with_backpressure()
                     .replay_last_bytes(1.megabytes())
                     .read_chunk_size(DEFAULT_READ_CHUNK_SIZE)
                     .max_buffered_chunks(DEFAULT_MAX_BUFFERED_CHUNKS)
@@ -369,10 +374,7 @@ impl ChromeForTestingManager {
         match startup_result {
             WaitForLineResult::Matched => {}
             WaitForLineResult::StreamClosed | WaitForLineResult::Timeout => {
-                if let Err(err) = chromedriver_process
-                    .terminate(Duration::from_secs(3), Duration::from_secs(3))
-                    .await
-                {
+                if let Err(err) = chromedriver_process.terminate(shutdown).await {
                     tracing::warn!(
                         error = %err,
                         "failed to terminate chromedriver after startup failure"
@@ -460,6 +462,7 @@ impl ChromeForTestingManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::chromedriver::default_graceful_shutdown;
     use crate::mgr::ChromeForTestingManager;
     use crate::port::Port;
     use crate::port::PortRequest;
@@ -467,7 +470,6 @@ mod tests {
     use assertr::prelude::*;
     use rootcause::Report;
     use serial_test::serial;
-    use std::time::Duration;
 
     #[ctor::ctor(unsafe)]
     fn init_test_tracing() {
@@ -549,10 +551,14 @@ mod tests {
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
         let (chromedriver, port, _output_inspectors) = mgr
-            .launch_chromedriver(&loaded, PortRequest::Specific(Port(3333)), None)
+            .launch_chromedriver(
+                &loaded,
+                PortRequest::Specific(Port(3333)),
+                None,
+                default_graceful_shutdown(),
+            )
             .await?;
-        let _chromedriver =
-            chromedriver.terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3));
+        let _chromedriver = chromedriver.terminate_on_drop(default_graceful_shutdown());
         assert_that!(port).is_equal_to(Port(3333));
         Ok(())
     }
@@ -565,10 +571,9 @@ mod tests {
         let selected = mgr.resolve_version(VersionRequest::Latest).await?;
         let loaded = mgr.download(selected).await?;
         let (chromedriver, port, _output_inspectors) = mgr
-            .launch_chromedriver(&loaded, PortRequest::Any, None)
+            .launch_chromedriver(&loaded, PortRequest::Any, None, default_graceful_shutdown())
             .await?;
-        let _chromedriver =
-            chromedriver.terminate_on_drop(Duration::from_secs(3), Duration::from_secs(3));
+        let _chromedriver = chromedriver.terminate_on_drop(default_graceful_shutdown());
 
         let caps = mgr.prepare_caps(&loaded)?;
         let driver = thirtyfour::WebDriver::new(format!("http://localhost:{port}"), caps).await?;

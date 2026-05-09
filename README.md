@@ -84,7 +84,7 @@ a specific `Version`, or a `VersionRequest`; `port` accepts a `u16`, a `Port`, o
 
 ```rust,no_run
 use chrome_for_testing_manager::{
-    Channel, Chromedriver, ChromedriverRunConfig, DriverOutputListener, TerminationTimeouts,
+    Channel, Chromedriver, ChromedriverRunConfig, DriverOutputListener, GracefulShutdown,
 };
 use std::time::Duration;
 
@@ -93,10 +93,10 @@ async fn run() -> Result<(), rootcause::Report<chrome_for_testing_manager::Chrom
         .version(Channel::Beta)
         .port(3000u16)
         .output_listener(DriverOutputListener::new(|line| println!("{line:?}")))
-        .termination_timeouts(
-            TerminationTimeouts::builder()
-                .interrupt(Duration::from_secs(5))
-                .terminate(Duration::from_secs(5))
+        .graceful_shutdown(
+            GracefulShutdown::builder()
+                .unix_sigterm(Duration::from_secs(5))
+                .windows_ctrl_break(Duration::from_secs(5))
                 .build(),
         )
         .build();
@@ -104,6 +104,11 @@ async fn run() -> Result<(), rootcause::Report<chrome_for_testing_manager::Chrom
     Ok(())
 }
 ```
+
+`GracefulShutdown` (re-exported from `tokio-process-tools`) mirrors the platform's actual graceful-shutdown model:
+
+- on Unix, it carries one or more phases (`SIGTERM` and/or `SIGINT`).
+- on Windows, it carries a single `CTRL_BREAK_EVENT` budget.
 
 ## Managed sessions opt-out
 

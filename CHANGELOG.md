@@ -61,11 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Breaking:** `Chromedriver::terminate_with_timeouts(interrupt, terminate)` has been removed. Configure the
   shutdown via `ChromedriverRunConfig::graceful_shutdown` and call `Chromedriver::terminate()` instead.
-  Migration: replace
-  `chromedriver.terminate_with_timeouts(Duration::from_secs(1), Duration::from_secs(1)).await`
-  with building the config via
-  `ChromedriverRunConfig::builder().graceful_shutdown(GracefulShutdown::builder().unix_sigterm(Duration::from_secs(1)).windows_ctrl_break(Duration::from_secs(1)).build()).build()`
-  and calling `chromedriver.terminate().await`.
 
 ## [0.9.1] - 2026-04-14
 

@@ -21,6 +21,8 @@ mod output;
 pub(crate) mod port;
 #[cfg(any(feature = "thirtyfour"))]
 pub(crate) mod session;
+#[cfg(any(feature = "thirtyfour"))]
+pub(crate) mod session_builder;
 pub(crate) mod version;
 
 pub use chrome_for_testing::Channel;
@@ -34,6 +36,8 @@ pub use output::{
 pub use port::{Port, PortRequest};
 #[cfg(any(feature = "thirtyfour"))]
 pub use session::Session;
+#[cfg(any(feature = "thirtyfour"))]
+pub use session_builder::{DefaultCaps, DefaultConfig, SessionBuilder};
 pub use tokio_process_tools::{
     GracefulShutdown, GracefulShutdownBuilder, UnixGracefulPhase, UnixGracefulShutdown,
     UnixGracefulSignal, WindowsGracefulShutdown,

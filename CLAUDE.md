@@ -33,12 +33,18 @@ All public types are re-exported from `lib.rs` (e.g., `chrome_for_testing_manage
 High-level entry point:
 - `Chromedriver::run(ChromedriverRunConfig)` (and `run_default()`) is the primary API. It resolves a version,
   downloads binaries, spawns chromedriver, and returns a handle that auto-terminates on drop via
-  `tokio_process_tools::TerminateOnDrop`.
+  `tokio_process_tools::TerminateOnDrop`. Call `.terminate().await` explicitly to consume the handle and obtain
+  the `ExitStatus`; `.port()` exposes the bound port for non-`thirtyfour` clients.
 - `ChromedriverRunConfig` is a `typed_builder` config covering `version`, `port`, optional `output_listener`,
   optional `cache_dir` override, and `termination_timeouts`. The `version` and `port` setters use `setter(into)`,
   so they accept `Channel` / `Version` / `VersionRequest` and `u16` / `Port` / `PortRequest` respectively.
-- `Chromedriver::with_session` / `with_custom_session` (feature `thirtyfour`) run an async closure against a
-  scoped `Session`, with panic-safe cleanup that always calls `WebDriver::quit`.
+- `Chromedriver::session()` (feature `thirtyfour`) returns a `SessionBuilder` with optional `.with_caps(...)` and
+  `.with_config(...)` setup steps and a terminal `.run(async |s| { ... }).await` that opens the session, hands it
+  to the user closure, and tears it down via `WebDriver::quit().await` with panic-safe cleanup. `with_config` mutates
+  the `thirtyfour::WebDriverBuilder` before the session opens, so the session is born with the requested poller /
+  request timeout / user-agent / keep-alive and no `clone_with_config` is needed. `session()` takes `&self`, so an
+  `Arc<Chromedriver>` can be cloned across a `JoinSet` to run many sessions concurrently against one chromedriver
+  (see `tests/multiple_sessions.rs`).
 
 Lower-level orchestration (`ChromeForTestingManager`):
 - `resolve_version(VersionRequest) -> SelectedVersion`: hits the chrome-for-testing release index only.
@@ -63,8 +69,8 @@ Errors and runtime constraints:
 - `Chromedriver::run` asserts `RuntimeFlavor::MultiThread` and errors with `UnsupportedRuntime` otherwise. Tests
   must use `#[tokio::test(flavor = "multi_thread")]`.
 
-Feature gate: `thirtyfour` (default). Gated items: `Session`, `Chromedriver::with_session`,
-`Chromedriver::with_custom_session`, `ChromeForTestingManager::prepare_caps`.
+Feature gate: `thirtyfour` (default). Gated items: `Session`, `Chromedriver::session`, `SessionBuilder` (and the
+`DefaultCaps` / `DefaultConfig` type-state markers re-exported alongside it), `ChromeForTestingManager::prepare_caps`.
 
 ## Conventions
 

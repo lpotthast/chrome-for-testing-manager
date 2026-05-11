@@ -24,7 +24,8 @@ async fn custom_graceful_shutdown() -> Result<(), Report> {
     .await?;
 
     chromedriver
-        .with_session(common::wikipedia::test_wikipedia)
+        .session()
+        .run(common::wikipedia::test_wikipedia)
         .await?;
 
     chromedriver.terminate().await?;

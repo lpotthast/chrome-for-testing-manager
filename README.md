@@ -20,9 +20,10 @@ and so that bumping the Chrome version under test is one simple change.
   grab the latest. Switching is a one-line change.
 - **Port and lifecycle managed for you.** Bind to a fixed port for debugging or let the OS pick one for parallel test
   isolation. The `chromedriver` process is terminated on drop, even on panics, which are very common in tests.
-- **Ergonomic `thirtyfour` integration.** Run a test inside `with_session(|session| ...)` and the WebDriver session is
-  created, scoped, and torn down automatically. The library needs a session-driver to be useful - `thirtyfour` is the
-  default; disable the feature only if you wire in another one.
+- **Ergonomic `thirtyfour` integration.** Run a browser test inside `session().run(|s| ...)` where the WebDriver session
+  is created, scoped, and torn down automatically. Optional `.with_caps(...)` and `.with_config(...)` builder steps let
+  you tweak Chrome capabilities or the WebDriver client without leaving the chain. The library needs a session-driver
+  to be useful. `thirtyfour` is the default with not current alternative. Disabling `thirtyfour` will disable sessions.
 - **Observable.** Attach a `DriverOutputListener` to stream `chromedriver` stdout/stderr lines into your own logging
   or fixtures.
 
@@ -30,7 +31,7 @@ and so that bumping the Chrome version under test is one simple change.
 
 ```toml
 [dependencies]
-chrome-for-testing-manager = "0.10"
+chrome-for-testing-manager = "0.11"
 rootcause = "0.12"
 thirtyfour = "0.37"
 
@@ -54,7 +55,8 @@ use thirtyfour::prelude::*;
 async fn main() -> Result<(), Report> {
     Chromedriver::run_default()
         .await?
-        .with_session(async |session| {
+        .session()
+        .run(async |session| {
             session.goto("https://wikipedia.org").await?;
 
             let search_form = session.find(By::Id("search-form")).await?;
@@ -112,14 +114,14 @@ async fn run() -> Result<(), rootcause::Report<chrome_for_testing_manager::Chrom
 
 ## Managed sessions opt-out
 
-The `with_session` function providing a `thirtyfour` session, called in the example, is only available because
+The `session()` builder providing a `thirtyfour` session, called in the example, is only available because
 `chrome-for-testing-manager` enables its `thirtyfour` feature by default.
 
 If you only want its chrome/chromedriver version resolution, download, and launch orchestration, declare the dependency
 as
 
 ```toml
-chrome-for-testing-manager = { version = "0.10", default-features = false }
+chrome-for-testing-manager = { version = "0.11", default-features = false }
 ```
 
 instead.

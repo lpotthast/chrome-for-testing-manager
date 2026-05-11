@@ -12,7 +12,8 @@ async fn custom_termination() -> Result<(), Report> {
     let chromedriver = Chromedriver::run(ChromedriverRunConfig::default()).await?;
 
     chromedriver
-        .with_session(common::wikipedia::test_wikipedia)
+        .session()
+        .run(common::wikipedia::test_wikipedia)
         .await?;
 
     chromedriver.terminate().await?;

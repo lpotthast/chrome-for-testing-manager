@@ -426,7 +426,7 @@ impl ChromeForTestingManager {
     /// and the headless flag set.
     ///
     /// Useful when constructing a [`thirtyfour::WebDriver`] manually instead of using
-    /// [`crate::Chromedriver::with_session`].
+    /// [`crate::Chromedriver::session`].
     ///
     /// # Errors
     ///

@@ -1,4 +1,4 @@
-//! Smoke test for the single-session happy path via [`Chromedriver::with_session`].
+//! Smoke test for the single-session happy path via [`Chromedriver::session`].
 
 use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
 use rootcause::Report;
@@ -11,7 +11,8 @@ async fn single_session() -> Result<(), Report> {
 
     Chromedriver::run(ChromedriverRunConfig::default())
         .await?
-        .with_session(common::wikipedia::test_wikipedia)
+        .session()
+        .run(common::wikipedia::test_wikipedia)
         .await?;
 
     Ok(())

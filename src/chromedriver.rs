@@ -2,11 +2,11 @@ use crate::ChromeForTestingManagerError;
 use crate::mgr::{ChromeForTestingManager, LoadedChromePackage};
 use crate::output::{DriverOutputInspectors, DriverOutputListener};
 use crate::port::{Port, PortRequest};
+#[cfg(feature = "thirtyfour")]
+use crate::session_builder::{DefaultCaps, DefaultConfig, SessionBuilder};
 use crate::version::VersionRequest;
 use chrome_for_testing::Channel;
 use rootcause::prelude::ResultExt;
-#[cfg(feature = "thirtyfour")]
-use rootcause::{IntoReportCollection, markers::SendSync};
 use rootcause::{Report, report};
 use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
@@ -95,15 +95,15 @@ impl Default for ChromedriverRunConfig {
 /// face of panics. Call [`Self::terminate`] to drive the same shutdown explicitly and surface any
 /// error.
 ///
-/// Drive `WebDriver` sessions through [`Self::with_session`] / [`Self::with_custom_session`].
-/// Sessions are independent, so multiple of them can run concurrently against the same chromedriver
-/// via `tokio::join!` or `tokio::spawn` on a multi-thread runtime.
+/// Drive browser sessions through [`Self::session`]. Sessions are independent, so multiple of them
+/// can run concurrently against the same chromedriver via `tokio::join!` or `tokio::spawn` on a
+/// multi-thread runtime.
 pub struct Chromedriver {
     /// The manager instance used to resolve a version, download it and starting the chromedriver.
-    mgr: ChromeForTestingManager,
+    pub(crate) mgr: ChromeForTestingManager,
 
     /// Chrome and chromedriver binaries used for testing.
-    loaded: LoadedChromePackage,
+    pub(crate) loaded: LoadedChromePackage,
 
     /// The running chromedriver process. Terminated when dropped.
     ///
@@ -220,87 +220,68 @@ impl Chromedriver {
             .context(ChromeForTestingManagerError::TerminateChromedriver { port: self.port })
     }
 
-    /// Execute an async closure with a `WebDriver` session.
-    /// The session will be automatically cleaned up after the closure completes.
+    /// Start building a scoped `thirtyfour` [`crate::Session`] against this chromedriver.
     ///
-    /// # Errors
+    /// This is the primary entry point for running a browser test. The returned
+    /// [`SessionBuilder`] is a fluent, chainable builder with three steps:
     ///
-    /// Returns an error if session creation fails or the user closure returns an error.
+    /// 1. (optional) [`SessionBuilder::with_caps`] mutates the
+    ///    [`thirtyfour::ChromeCapabilities`] used to create the session (e.g. unset headless, add
+    ///    Chrome args, register extensions).
+    /// 2. (optional) [`SessionBuilder::with_config`] receives the
+    ///    [`thirtyfour::WebDriverBuilder`] and may set client-side options such as the element
+    ///    poller, request timeout, user-agent, or keep-alive flag before the session is opened.
+    /// 3. (required, terminal) [`SessionBuilder::run`] opens the session, awaits the user
+    ///    closure, and tears the session down once the closure resolves or panics.
+    ///
+    /// Sessions are independent. Multiple sessions can run concurrently against the same
+    /// `Chromedriver` via `tokio::join!` or `tokio::spawn` on a multi-thread runtime.
+    ///
+    /// # Examples
+    ///
+    /// Smallest case (default headless capabilities, default client config):
+    ///
+    /// ```no_run
+    /// use chrome_for_testing_manager::Chromedriver;
+    /// use rootcause::Report;
+    ///
+    /// # async fn run() -> Result<(), Report> {
+    /// Chromedriver::run_default()
+    ///     .await?
+    ///     .session()
+    ///     .run(async |session| {
+    ///         session.goto("https://wikipedia.org").await?;
+    ///         Ok::<(), thirtyfour::error::WebDriverError>(())
+    ///     })
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// With both setup steps:
+    ///
+    /// ```no_run
+    /// use chrome_for_testing_manager::Chromedriver;
+    /// use rootcause::Report;
+    /// use std::time::Duration;
+    /// use thirtyfour::ChromiumLikeCapabilities;
+    ///
+    /// # async fn run() -> Result<(), Report> {
+    /// Chromedriver::run_default()
+    ///     .await?
+    ///     .session()
+    ///     .with_caps(ChromiumLikeCapabilities::unset_headless)
+    ///     .with_config(|b| b.request_timeout(Duration::from_secs(30)))
+    ///     .run(async |session| {
+    ///         session.goto("https://wikipedia.org").await?;
+    ///         Ok::<(), thirtyfour::error::WebDriverError>(())
+    ///     })
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
     #[cfg(feature = "thirtyfour")]
-    pub async fn with_session<T, E, F>(
-        &self,
-        f: F,
-    ) -> Result<T, Report<ChromeForTestingManagerError>>
-    where
-        F: for<'a> AsyncFnOnce(&'a crate::session::Session) -> Result<T, E>,
-        E: IntoReportCollection<SendSync>,
-    {
-        self.with_custom_session(|_caps| Ok(()), f).await
-    }
-
-    /// Execute an async closure with a custom-configured `WebDriver` session.
-    /// The session will be automatically cleaned up after the closure completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if capability setup, session creation, or the user closure fails.
-    #[cfg(feature = "thirtyfour")]
-    pub async fn with_custom_session<T, E, F>(
-        &self,
-        setup: impl FnOnce(
-            &mut thirtyfour::ChromeCapabilities,
-        ) -> Result<(), thirtyfour::prelude::WebDriverError>,
-        f: F,
-    ) -> Result<T, Report<ChromeForTestingManagerError>>
-    where
-        F: for<'a> AsyncFnOnce(&'a crate::session::Session) -> Result<T, E>,
-        E: IntoReportCollection<SendSync>,
-    {
-        use crate::session::Session;
-        use futures::FutureExt;
-
-        let mut caps = self.mgr.prepare_caps(&self.loaded)?;
-        setup(&mut caps).context(ChromeForTestingManagerError::ConfigureSessionCapabilities)?;
-        let driver = thirtyfour::WebDriver::new(format!("http://localhost:{}", self.port), caps)
-            .await
-            .context(ChromeForTestingManagerError::StartWebDriverSession { port: self.port })?;
-
-        let session = Session { driver };
-
-        // Execute the user function.
-        let maybe_panicked = core::panic::AssertUnwindSafe(f(&session))
-            .catch_unwind()
-            .await;
-
-        let user_result = match maybe_panicked {
-            Ok(result) => result.context(ChromeForTestingManagerError::RunSessionCallback),
-            Err(payload) => {
-                if let Err(quit_err) = session.quit().await {
-                    tracing::error!(
-                        "Failed to quit WebDriver session after user callback panic: {quit_err:?}"
-                    );
-                }
-                std::panic::resume_unwind(payload);
-            }
-        };
-
-        // No matter what happened, clean up the session.
-        let quit_result = session.quit().await;
-
-        match (user_result, quit_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Ok(_), Err(quit_err)) => Err(quit_err),
-            (Err(user_err), Ok(())) => Err(user_err),
-            (Err(mut user_err), Err(quit_err)) => {
-                tracing::error!(
-                    "Failed to quit WebDriver session after user failure: {quit_err:?}"
-                );
-                user_err
-                    .children_mut()
-                    .push(quit_err.into_dynamic().into_cloneable());
-                Err(user_err)
-            }
-        }
+    #[must_use]
+    pub fn session(&self) -> SessionBuilder<'_, DefaultCaps, DefaultConfig> {
+        SessionBuilder::new(self)
     }
 }
 

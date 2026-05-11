@@ -20,7 +20,8 @@ async fn multiple_sessions() -> Result<(), Report> {
         let chromedriver = Arc::clone(&chromedriver);
         tests.spawn(async move {
             chromedriver
-                .with_session(common::wikipedia::test_wikipedia)
+                .session()
+                .run(common::wikipedia::test_wikipedia)
                 .await
         });
     }

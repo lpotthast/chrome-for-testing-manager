@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-05-11
+
+### Changed
+
+- **Breaking:** Replaced `Chromedriver::with_session` and `Chromedriver::with_custom_session` with a fluent
+  `Chromedriver::session()` builder. The returned `SessionBuilder` exposes optional `.with_caps(...)` and
+  `.with_config(...)` setup steps and a terminal `.run(...)` that opens the session, hands it to a user closure, and
+  tears it down with the same scoped, panic-safe cleanup as before. Each setup step can be called at most once and is
+  enforced by the type system. `.with_config(...)` configures the `thirtyfour::WebDriverBuilder` before the session is
+  opened.
+
 ## [0.10.0] - 2026-05-04
 
 ### Added

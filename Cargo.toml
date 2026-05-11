@@ -1,6 +1,6 @@
 [package]
 name = "chrome-for-testing-manager"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.89.0"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
@@ -37,9 +37,9 @@ zip = { version = "8.0.0", default-features = false, features = ["deflate"] }
 assertr = "0.6.0"
 chrome-for-testing-manager = { path = ".", features = ["thirtyfour"] }
 # ^.. This is a way to say: Please enable the "thirtyfour" feature for all tests.
-ctor = "1.0.0"
+ctor = "1.0.4"
 serial_test = "3.4.0"
-tokio = { version = "1.51.1", features = ["macros"] }
+tokio = { version = "1.52.3", features = ["macros"] }
 tracing-subscriber = "0.3.23"
 
 [lints.rust]

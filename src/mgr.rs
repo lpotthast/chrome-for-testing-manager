@@ -402,22 +402,21 @@ impl ChromeForTestingManager {
     }
 
     #[cfg(target_os = "windows")]
+    #[expect(clippy::unused_self)]
     fn apply_chromedriver_creation_flags<'a>(&self, command: &'a mut Command) -> &'a mut Command {
-        use std::os::windows::process::CommandExt;
-
         // CREATE_NO_WINDOW (0x08000000) is a Windows-specific process creation flag that prevents
         // a process from creating a new window. This is relevant for ChromeDriver because:
         //   - ChromeDriver is typically a console application on Windows.
         //   - Without this flag, launching ChromeDriver would create a visible console window.
         //   - In our automation scenario, we don't want users to see this console window popping up.
         //   - The window isn't necessary since we're already capturing the stdout/stderr streams programmatically.
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
         command.creation_flags(CREATE_NO_WINDOW)
     }
 
     #[cfg(not(target_os = "windows"))]
-    #[allow(clippy::unused_self)] // Symmetry with the Windows variant that uses `self`.
+    #[expect(clippy::unused_self)]
     fn apply_chromedriver_creation_flags<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
     }

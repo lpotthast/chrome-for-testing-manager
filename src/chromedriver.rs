@@ -1,15 +1,15 @@
 use crate::ChromeForTestingManagerError;
-use crate::mgr::{ChromeForTestingManager, LoadedChromePackage};
+use crate::mgr::{ChromeBinary, ChromeForTestingManager, LoadedBrowserPackage};
 use crate::output::{DriverOutputInspectors, DriverOutputListener};
 use crate::port::{Port, PortRequest};
 #[cfg(feature = "thirtyfour")]
-use crate::session_builder::{DefaultCaps, DefaultConfig, SessionBuilder};
+use crate::session_builder::{InitialCaps, InitialConfig, SessionBuilder};
 use crate::version::VersionRequest;
 use chrome_for_testing::Channel;
 use rootcause::prelude::ResultExt;
 use rootcause::{Report, report};
 use std::fmt::{Debug, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::runtime::RuntimeFlavor;
@@ -54,32 +54,39 @@ pub(crate) fn default_graceful_shutdown() -> GracefulShutdown {
 /// ```
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct ChromedriverRunConfig {
-    /// The requested `ChromeDriver` version.
+    /// The requested `Chrome`/`ChromeDriver` version.
     ///
     /// Accepts anything implementing `Into<VersionRequest>`, including [`Channel`] and
     /// [`crate::Version`].
     #[builder(default = VersionRequest::LatestIn(Channel::Stable), setter(into))]
-    pub version: VersionRequest,
+    version: VersionRequest,
+
+    /// Chrome browser binary to run with `ChromeDriver`.
+    ///
+    /// Defaults to regular [`ChromeBinary::Chrome`]. Use [`ChromeBinary::ChromeHeadlessShell`] for
+    /// headless-only environments that cannot launch the full `Chrome` application.
+    #[builder(default)]
+    chrome_binary: ChromeBinary,
 
     /// The requested `ChromeDriver` port.
     ///
     /// Accepts anything implementing `Into<PortRequest>`, including a bare `u16` and [`Port`].
     #[builder(default = PortRequest::Any, setter(into))]
-    pub port: PortRequest,
+    port: PortRequest,
 
     /// Optional callback for browser-driver process output lines.
     #[builder(default, setter(strip_option(fallback = output_listener_opt)))]
-    pub output_listener: Option<DriverOutputListener>,
+    output_listener: Option<DriverOutputListener>,
 
     /// Optional override for the cache directory holding downloaded chrome / chromedriver
     /// artifacts. Defaults to the platform's per-user cache directory.
     #[builder(default, setter(strip_option(fallback = cache_dir_opt)))]
-    pub cache_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
 
     /// Per-platform graceful-shutdown budget applied when the [`Chromedriver`] handle is dropped
     /// or [`Chromedriver::terminate`] is called.
     #[builder(default = default_graceful_shutdown())]
-    pub graceful_shutdown: GracefulShutdown,
+    graceful_shutdown: GracefulShutdown,
 }
 
 impl Default for ChromedriverRunConfig {
@@ -88,12 +95,50 @@ impl Default for ChromedriverRunConfig {
     }
 }
 
+impl ChromedriverRunConfig {
+    /// The requested `Chrome` / `ChromeDriver` version.
+    #[must_use]
+    pub const fn version(&self) -> &VersionRequest {
+        &self.version
+    }
+
+    /// The browser package to use with `ChromeDriver`.
+    #[must_use]
+    pub const fn chrome_binary(&self) -> ChromeBinary {
+        self.chrome_binary
+    }
+
+    /// The requested `ChromeDriver` port.
+    #[must_use]
+    pub const fn port(&self) -> PortRequest {
+        self.port
+    }
+
+    /// The optional process-output listener.
+    #[must_use]
+    pub fn output_listener(&self) -> Option<&DriverOutputListener> {
+        self.output_listener.as_ref()
+    }
+
+    /// The configured cache directory override, if any.
+    #[must_use]
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.cache_dir.as_deref()
+    }
+
+    /// The graceful-shutdown budget used when terminating the `ChromeDriver` process.
+    #[must_use]
+    pub const fn graceful_shutdown(&self) -> &GracefulShutdown {
+        &self.graceful_shutdown
+    }
+}
+
 /// A handle to a spawned chromedriver process plus its resolved Chrome / `ChromeDriver` binaries.
 ///
 /// Terminates automatically when dropped, using the budget configured via
-/// [`ChromedriverRunConfig::graceful_shutdown`]. The on-drop automation keeps tests safe in the
-/// face of panics. Call [`Self::terminate`] to drive the same shutdown explicitly and surface any
-/// error.
+/// `ChromedriverRunConfig::builder().graceful_shutdown(...)`. The on-drop automation keeps tests
+/// safe in the face of panics. Call [`Self::terminate`] to drive the same shutdown explicitly and
+/// surface any error.
 ///
 /// Drive browser sessions through [`Self::session`]. Sessions are independent, so multiple of them
 /// can run concurrently against the same chromedriver via `tokio::join!` or `tokio::spawn` on a
@@ -102,8 +147,8 @@ pub struct Chromedriver {
     /// The manager instance used to resolve a version, download it and starting the chromedriver.
     pub(crate) mgr: ChromeForTestingManager,
 
-    /// Chrome and chromedriver binaries used for testing.
-    pub(crate) loaded: LoadedChromePackage,
+    /// Browser and chromedriver binaries used for testing.
+    pub(crate) loaded: LoadedBrowserPackage,
 
     /// The running chromedriver process. Terminated when dropped.
     ///
@@ -119,7 +164,7 @@ pub struct Chromedriver {
     port: Port,
 
     /// Graceful-shutdown budget to use when terminating, including on drop.
-    graceful_shutdown: GracefulShutdown,
+    pub(crate) graceful_shutdown: GracefulShutdown,
 }
 
 impl Debug for Chromedriver {
@@ -174,7 +219,7 @@ impl Chromedriver {
             None => ChromeForTestingManager::new()?,
         };
         let selected = mgr.resolve_version(config.version).await?;
-        let loaded = mgr.download(selected).await?;
+        let loaded = mgr.download_one(&selected, config.chrome_binary).await?;
         let graceful_shutdown = config.graceful_shutdown;
         let (process_handle, actual_port, output_inspectors) = mgr
             .launch_chromedriver(
@@ -203,7 +248,7 @@ impl Chromedriver {
     }
 
     /// Gracefully terminate the chromedriver process with the configured [`GracefulShutdown`],
-    /// configurable via the `graceful_shutdown` field of [`ChromedriverRunConfig`].
+    /// configurable via `ChromedriverRunConfig::builder().graceful_shutdown(...)`.
     ///
     /// # Errors
     ///
@@ -280,7 +325,7 @@ impl Chromedriver {
     /// ```
     #[cfg(feature = "thirtyfour")]
     #[must_use]
-    pub fn session(&self) -> SessionBuilder<'_, DefaultCaps, DefaultConfig> {
+    pub fn session(&self) -> SessionBuilder<'_, InitialCaps, InitialConfig> {
         SessionBuilder::new(self)
     }
 }
@@ -294,9 +339,10 @@ mod tests {
     fn run_config_defaults_to_latest_stable_on_any_port() {
         let config = ChromedriverRunConfig::builder().build();
 
-        assert_that!(config.version).is_equal_to(VersionRequest::LatestIn(Channel::Stable));
-        assert_that!(config.port).is_equal_to(PortRequest::Any);
-        assert_that!(config.output_listener).is_none();
+        assert_that!(config.version()).is_equal_to(VersionRequest::LatestIn(Channel::Stable));
+        assert_that!(config.chrome_binary()).is_equal_to(ChromeBinary::Chrome);
+        assert_that!(config.port()).is_equal_to(PortRequest::Any);
+        assert_that!(config.output_listener()).is_none();
     }
 
     #[test]
@@ -307,7 +353,7 @@ mod tests {
             .output_listener(listener)
             .build();
 
-        assert_that!(config.output_listener).is_some();
+        assert_that!(config.output_listener()).is_some();
     }
 
     #[test]
@@ -318,19 +364,19 @@ mod tests {
             .output_listener_opt(Some(listener))
             .build();
 
-        assert_that!(config.output_listener).is_some();
+        assert_that!(config.output_listener()).is_some();
 
         let config = ChromedriverRunConfig::builder()
             .output_listener_opt(None)
             .build();
 
-        assert_that!(config.output_listener).is_none();
+        assert_that!(config.output_listener()).is_none();
     }
 
     #[test]
     fn builder_port_accepts_u16_via_setter_into() {
         let config = ChromedriverRunConfig::builder().port(8080u16).build();
-        assert_that!(config.port).is_equal_to(PortRequest::Specific(Port(8080)));
+        assert_that!(config.port()).is_equal_to(PortRequest::Specific(Port::new(8080)));
     }
 
     #[test]
@@ -338,7 +384,15 @@ mod tests {
         let config = ChromedriverRunConfig::builder()
             .version(Channel::Beta)
             .build();
-        assert_that!(config.version).is_equal_to(VersionRequest::LatestIn(Channel::Beta));
+        assert_that!(config.version()).is_equal_to(VersionRequest::LatestIn(Channel::Beta));
+    }
+
+    #[test]
+    fn builder_accepts_chrome_headless_shell_binary() {
+        let config = ChromedriverRunConfig::builder()
+            .chrome_binary(ChromeBinary::ChromeHeadlessShell)
+            .build();
+        assert_that!(config.chrome_binary()).is_equal_to(ChromeBinary::ChromeHeadlessShell);
     }
 
     #[test]
@@ -352,8 +406,10 @@ mod tests {
             .graceful_shutdown(shutdown.clone())
             .build();
 
-        assert_that!(config.cache_dir).is_equal_to(Some(PathBuf::from("/tmp/cft-cache")));
-        assert_that!(config.graceful_shutdown).is_equal_to(shutdown);
+        assert_that!(config.cache_dir())
+            .is_some()
+            .is_equal_to(Path::new("/tmp/cft-cache"));
+        assert_that!(config.graceful_shutdown()).is_equal_to(shutdown);
     }
 
     #[test]

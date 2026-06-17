@@ -31,8 +31,8 @@ and so that bumping the Chrome version under test is one simple change.
 
 ```toml
 [dependencies]
-chrome-for-testing-manager = "0.11"
-rootcause = "0.12"
+chrome-for-testing-manager = "0.12"
+rootcause = "0.13"
 thirtyfour = "0.37"
 
 # Additional dependencies for the example below.
@@ -121,7 +121,7 @@ If you only want its chrome/chromedriver version resolution, download, and launc
 as
 
 ```toml
-chrome-for-testing-manager = { version = "0.11", default-features = false }
+chrome-for-testing-manager = { version = "0.12", default-features = false }
 ```
 
 instead.
@@ -131,7 +131,10 @@ instead.
 For most users `Chromedriver` is the right entry point. If you need finer control, pre-warming the cache without
 spawning chromedriver, running multiple chromedriver instances off a single download, pinning a custom cache directory
 in CI, or driving sessions through a non-`thirtyfour` WebDriver client, reach for `ChromeForTestingManager` directly.
-It exposes `resolve_version`, `download`, `launch_chromedriver`, and `prepare_caps` as separate steps.
+It exposes `resolve_version`, `download`, `launch_chromedriver`, and `prepare_caps` as separate steps. Pass one or more
+`ChromeBinary` values to `download` to pre-warm regular Chrome, Chrome Headless Shell, or both. The returned
+`LoadedBrowserPackage` enum identifies which browser package was loaded; match it when behavior differs between regular
+Chrome and Chrome Headless Shell.
 
 ## MSRV
 

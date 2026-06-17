@@ -29,7 +29,10 @@ pub use chrome_for_testing::Channel;
 pub use chrome_for_testing::Version;
 pub use chromedriver::{Chromedriver, ChromedriverRunConfig};
 pub use error::{ChromeForTestingArtifact, ChromeForTestingManagerError, Result};
-pub use mgr::{ChromeForTestingManager, LoadedChromePackage};
+pub use mgr::{
+    ChromeBinary, ChromeForTestingManager, LoadedBrowserPackage, LoadedChromeHeadlessShellPackage,
+    LoadedChromePackage,
+};
 pub use output::{
     DriverOutputInspectors, DriverOutputLine, DriverOutputListener, DriverOutputSource,
 };
@@ -37,7 +40,7 @@ pub use port::{Port, PortRequest};
 #[cfg(any(feature = "thirtyfour"))]
 pub use session::Session;
 #[cfg(any(feature = "thirtyfour"))]
-pub use session_builder::{DefaultCaps, DefaultConfig, SessionBuilder};
+pub use session_builder::SessionBuilder;
 pub use tokio_process_tools::{
     GracefulShutdown, GracefulShutdownBuilder, UnixGracefulPhase, UnixGracefulShutdown,
     UnixGracefulSignal, WindowsGracefulShutdown,

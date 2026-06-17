@@ -117,12 +117,12 @@ async fn write_file(
             }
             Ok(Ok(None)) => break,
             Ok(Err(err)) => {
-                return Err(
-                    Report::new(err).context(ChromeForTestingManagerError::Download {
+                return Err(Report::new_sendsync(err).context(
+                    ChromeForTestingManagerError::Download {
                         artifact,
                         url: response.url().to_string(),
-                    }),
-                );
+                    },
+                ));
             }
             Err(_elapsed) => {
                 consecutive_stalls += 1;

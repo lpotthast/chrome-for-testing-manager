@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-06-16
+
+### Added
+
+- `ChromeBinary` selection for `ChromedriverRunConfig`, allowing callers to use regular Chrome for Testing or
+  `ChromeBinary::ChromeHeadlessShell`.
+- `ChromeForTestingManager::download(&selected, &[ChromeBinary::...])` for explicitly requesting one or more binaries.
+  The manager downloads the requested binaries and matching `ChromeDriver` concurrently.
+- Managed `thirtyfour` sessions for Chrome Headless Shell. The manager starts Chrome Headless Shell separately, creates
+  an initial page, attaches ChromeDriver, and cleans up the browser process with the configured `GracefulShutdown`.
+- `LoadedBrowserPackage`, `LoadedChromePackage`, and `LoadedChromeHeadlessShellPackage` for explicitly representing
+  whether a loaded browser package is regular Chrome or Chrome Headless Shell.
+- `LoadedBrowserPackage::chrome_binary()`, `LoadedBrowserPackage::browser_executable()`, and
+  `SelectedVersion::has_chrome_headless_shell_download()` accessors.
+- `ChromedriverRunConfig` read-only accessors for inspecting builder-produced configs after construction.
+
+### Changed
+
+- **Breaking:** `ChromedriverRunConfig` fields are no longer public. Construct configs through
+  `ChromedriverRunConfig::builder()` or `Default` instead of struct literals or direct field mutation.
+- **Breaking:** `Port` is now opaque. Use `Port::new(value)` to construct one and `port.as_u16()` to read the raw
+  value instead of `Port(value)` or `.0`.
+- **Breaking:** `VersionRequest` is now `#[non_exhaustive]`. Downstream exhaustive matches need a wildcard arm.
+- **Breaking:** `DefaultCaps` and `DefaultConfig` are no longer re-exported from the crate root. These are internal
+  session-builder type-state markers and do not need to be named by callers using the fluent session API.
+- **Breaking:** `ChromeForTestingManager::download(...)` now takes a borrowed `SelectedVersion` and a non-empty
+  `&[ChromeBinary]` request and returns `Vec<LoadedBrowserPackage>`. Passing an empty slice returns an error.
+- **Breaking:** `ChromeForTestingManager::launch_chromedriver(...)` and `prepare_caps(...)` now take
+  `LoadedBrowserPackage`, while `LoadedChromePackage` specifically means the regular Chrome package.
+- **Breaking:** `ChromeForTestingManagerError::PrepareChromeCapabilities` now stores a `browser_executable` path
+  instead of a `chrome_executable` path.
+- Invalid Chrome Headless Shell `--remote-debugging-port` arguments are rejected during session setup with a targeted
+  error instead of failing later as browser startup timeouts.
+- Upgrade `rootcause` dependency to 0.13.0.
+
 ## [0.11.0] - 2026-05-11
 
 ### Changed
@@ -258,7 +293,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
-[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.12.0...HEAD
+
+[0.12.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.11.0...v0.12.0
+
+[0.11.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.10.0...v0.11.0
 
 [0.10.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.9.1...0.10.0
 

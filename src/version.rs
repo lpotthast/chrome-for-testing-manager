@@ -7,6 +7,7 @@ use chrome_for_testing::{
 /// See the named constructors ([`Self::stable`], [`Self::beta`], [`Self::dev`], [`Self::canary`])
 /// and the `From<Channel>` / `From<Version>` impls for the most ergonomic forms.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VersionRequest {
     /// Uses the latest working version. Might not be stable yet.
     /// You may want to prefer variant [`VersionRequest::LatestIn`] instead.
@@ -62,12 +63,13 @@ impl VersionRequest {
 /// chrome-for-testing release index but not yet downloaded.
 ///
 /// Construct via [`crate::ChromeForTestingManager::resolve_version`] and pass into
-/// [`crate::ChromeForTestingManager::download`].
+/// [`crate::ChromeForTestingManager::download`] with one or more [`crate::ChromeBinary`] values.
 #[derive(Debug)]
 pub struct SelectedVersion {
     pub(crate) channel: Option<Channel>,
     pub(crate) version: Version,
     pub(crate) chrome: Option<Download>,
+    pub(crate) chrome_headless_shell: Option<Download>,
     pub(crate) chromedriver: Option<Download>,
 }
 
@@ -91,6 +93,12 @@ impl SelectedVersion {
         self.chrome.is_some()
     }
 
+    /// Whether a Chrome Headless Shell download exists for this version on the detected platform.
+    #[must_use]
+    pub fn has_chrome_headless_shell_download(&self) -> bool {
+        self.chrome_headless_shell.is_some()
+    }
+
     /// Whether a `ChromeDriver` download exists for this version on the detected platform.
     #[must_use]
     pub fn has_chromedriver_download(&self) -> bool {
@@ -104,6 +112,7 @@ impl From<(VersionWithoutChannel, Platform)> for SelectedVersion {
             channel: None,
             version: v.version,
             chrome: v.downloads.chrome_for_platform(p).cloned(),
+            chrome_headless_shell: v.downloads.chrome_headless_shell_for_platform(p).cloned(),
             chromedriver: v.downloads.chromedriver_for_platform(p).cloned(),
         }
     }
@@ -118,6 +127,7 @@ impl From<(VersionInChannel, Platform)> for SelectedVersion {
             channel: Some(v.channel),
             version: v.version,
             chrome: chrome_download,
+            chrome_headless_shell: v.downloads.chrome_headless_shell_for_platform(p).cloned(),
             chromedriver: chromedriver_download,
         }
     }

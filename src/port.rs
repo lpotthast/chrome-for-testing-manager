@@ -2,11 +2,25 @@ use std::fmt::{Display, Formatter};
 
 /// A TCP port bound (or to be bound) by a chromedriver process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Port(pub u16);
+pub struct Port(u16);
+
+impl Port {
+    /// Create a typed port from a raw `u16`.
+    #[must_use]
+    pub const fn new(value: u16) -> Self {
+        Self(value)
+    }
+
+    /// Return the raw `u16` port value.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self.0
+    }
+}
 
 impl From<u16> for Port {
     fn from(value: u16) -> Self {
-        Self(value)
+        Self::new(value)
     }
 }
 
@@ -34,7 +48,7 @@ pub enum PortRequest {
 
 impl From<u16> for PortRequest {
     fn from(value: u16) -> Self {
-        Self::Specific(Port(value))
+        Self::Specific(Port::new(value))
     }
 }
 
@@ -51,11 +65,13 @@ mod tests {
 
     #[test]
     fn port_from_u16_constructs_typed_port() {
-        assert_that!(Port::from(8080u16)).is_equal_to(Port(8080));
+        assert_that!(Port::from(8080u16)).is_equal_to(Port::new(8080));
+        assert_that!(Port::from(8080u16).as_u16()).is_equal_to(8080);
     }
 
     #[test]
     fn port_request_from_u16_constructs_specific_port() {
-        assert_that!(PortRequest::from(8080u16)).is_equal_to(PortRequest::Specific(Port(8080)));
+        assert_that!(PortRequest::from(8080u16))
+            .is_equal_to(PortRequest::Specific(Port::new(8080)));
     }
 }

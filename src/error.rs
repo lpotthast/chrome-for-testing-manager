@@ -28,6 +28,9 @@ pub enum ChromeForTestingArtifact {
     /// The Chrome browser binary package.
     Chrome,
 
+    /// The Chrome Headless Shell binary package.
+    ChromeHeadlessShell,
+
     /// The Chromedriver package.
     ChromeDriver,
 }
@@ -36,6 +39,7 @@ impl Display for ChromeForTestingArtifact {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Chrome => f.write_str("chrome"),
+            Self::ChromeHeadlessShell => f.write_str("chrome-headless-shell"),
             Self::ChromeDriver => f.write_str("chromedriver"),
         }
     }
@@ -97,9 +101,22 @@ pub enum ChromeForTestingManagerError {
         version_request: VersionRequest,
     },
 
+    /// No Chrome binary was requested for a download operation.
+    #[error("at least one Chrome binary must be requested")]
+    EmptyChromeBinaryDownloadRequest,
+
     /// No Chrome download exists for the selected version and platform.
     #[error("no chrome download for version {version} on {platform}")]
     NoChromeDownload {
+        /// The selected Chrome version.
+        version: Version,
+        /// The detected platform.
+        platform: Platform,
+    },
+
+    /// No Chrome Headless Shell download exists for the selected version and platform.
+    #[error("no chrome-headless-shell download for version {version} on {platform}")]
+    NoChromeHeadlessShellDownload {
         /// The selected Chrome version.
         version: Version,
         /// The detected platform.
@@ -224,11 +241,61 @@ pub enum ChromeForTestingManagerError {
         path: PathBuf,
     },
 
+    /// The browser process could not be spawned.
+    #[error("failed to spawn browser process {}", .path.display())]
+    SpawnBrowser {
+        /// The browser executable path.
+        path: PathBuf,
+    },
+
+    /// A Chrome Headless Shell session was configured with an unsupported remote debugging arg.
+    #[error(
+        "Chrome Headless Shell sessions require a TCP remote debugging port; unsupported argument {arg:?}"
+    )]
+    UnsupportedHeadlessShellRemoteDebuggingArg {
+        /// The unsupported browser argument.
+        arg: String,
+    },
+
+    /// A Chrome Headless Shell session was configured with an invalid remote debugging port arg.
+    #[error(
+        "Chrome Headless Shell sessions require --remote-debugging-port=<0-65535>; invalid argument {arg:?}"
+    )]
+    InvalidHeadlessShellRemoteDebuggingPortArg {
+        /// The invalid browser argument.
+        arg: String,
+    },
+
+    /// A Chrome Headless Shell session was configured with multiple remote debugging port args.
+    #[error(
+        "Chrome Headless Shell sessions require exactly one TCP remote debugging port; conflicting arguments {first_arg:?} and {second_arg:?}"
+    )]
+    ConflictingHeadlessShellRemoteDebuggingArgs {
+        /// The first configured remote debugging port argument.
+        first_arg: String,
+        /// The second configured remote debugging port argument.
+        second_arg: String,
+    },
+
     /// Chromedriver did not report startup before the timeout.
     #[error("failed while waiting for chromedriver {} to start", .path.display())]
     WaitForChromedriverStartup {
         /// The chromedriver executable path.
         path: PathBuf,
+    },
+
+    /// The browser process did not report `DevTools` startup before the timeout.
+    #[error("failed while waiting for browser {} to expose DevTools", .path.display())]
+    WaitForBrowserStartup {
+        /// The browser executable path.
+        path: PathBuf,
+    },
+
+    /// An initial browser page could not be created through the `DevTools` endpoint.
+    #[error("failed to create initial browser page through DevTools at {debugger_address}")]
+    CreateInitialBrowserPage {
+        /// The `DevTools` HTTP endpoint address.
+        debugger_address: String,
     },
 
     /// The chromedriver process could not be terminated.
@@ -238,15 +305,22 @@ pub enum ChromeForTestingManagerError {
         port: Port,
     },
 
+    /// The browser process could not be terminated.
+    #[error("failed to terminate browser process attached at {debugger_address}")]
+    TerminateBrowser {
+        /// The `DevTools` HTTP endpoint address.
+        debugger_address: String,
+    },
+
     /* Session lifecycle. */
     /// Chrome capabilities could not be prepared.
     #[error(
         "failed to prepare Chrome capabilities for {}",
-        .chrome_executable.display()
+        .browser_executable.display()
     )]
     PrepareChromeCapabilities {
-        /// The Chrome executable path.
-        chrome_executable: PathBuf,
+        /// The browser executable path.
+        browser_executable: PathBuf,
     },
 
     /// User-provided capability setup failed.

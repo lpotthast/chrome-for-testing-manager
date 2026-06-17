@@ -137,7 +137,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cabe5069b1ad28e931e7d583358f1ab5288d783ed43d40182195622a665ce745"
 dependencies = [
  "reqwest",
- "rootcause",
+ "rootcause 0.12.1",
  "serde",
  "thiserror",
  "time",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "chrome-for-testing-manager"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "assertr",
  "chrome-for-testing",
@@ -155,7 +155,7 @@ dependencies = [
  "directories",
  "futures",
  "reqwest",
- "rootcause",
+ "rootcause 0.13.0",
  "serial_test",
  "thirtyfour",
  "thiserror",
@@ -1365,7 +1365,20 @@ checksum = "4fc4bd36159c7ce180fe2de1e5371ef107a2885f0048430f631e78202e2255d4"
 dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
- "rootcause-internals",
+ "rootcause-internals 0.12.1",
+ "rustc-hash",
+ "triomphe",
+]
+
+[[package]]
+name = "rootcause"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b660d9968fae12f4e691f2b2be5d9a3a6de875300c682e8d2cb89a618dd60875"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "rootcause-internals 0.13.0",
  "rustc-hash",
  "triomphe",
 ]
@@ -1375,6 +1388,15 @@ name = "rootcause-internals"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d0df4f84d119d09b5c9c9e8db0fe9bfb5b47b04d0bb95b0763cf81bd9baa559"
+dependencies = [
+ "triomphe",
+]
+
+[[package]]
+name = "rootcause-internals"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0184f6fcff3b58b7c963aee6e3cc915c04331aa6eef974f79d7d44d21e246c24"
 dependencies = [
  "triomphe",
 ]

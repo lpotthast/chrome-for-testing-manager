@@ -3,6 +3,7 @@
 //! Loaded packages retain a shared cache lease so executable paths remain valid for their entire
 //! lifetime.
 
+use crate::ChromeForTestingArtifact;
 use crate::cache::CacheLease;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,16 @@ pub enum BrowserArtifactRequest {
     Both,
 }
 
+impl ChromeBinary {
+    /// The artifact holding this browser package.
+    pub(crate) const fn artifact(self) -> ChromeForTestingArtifact {
+        match self {
+            Self::Chrome => ChromeForTestingArtifact::Chrome,
+            Self::ChromeHeadlessShell => ChromeForTestingArtifact::ChromeHeadlessShell,
+        }
+    }
+}
+
 impl BrowserArtifactRequest {
     pub(crate) const fn contains(self, binary: ChromeBinary) -> bool {
         matches!(
@@ -40,18 +51,6 @@ impl BrowserArtifactRequest {
                 | (Self::ChromeHeadlessShell, ChromeBinary::ChromeHeadlessShell)
                 | (Self::Both, _)
         )
-    }
-
-    pub(crate) fn binaries(self) -> impl Iterator<Item = ChromeBinary> {
-        let binaries = match self {
-            Self::Chrome => [Some(ChromeBinary::Chrome), None],
-            Self::ChromeHeadlessShell => [Some(ChromeBinary::ChromeHeadlessShell), None],
-            Self::Both => [
-                Some(ChromeBinary::Chrome),
-                Some(ChromeBinary::ChromeHeadlessShell),
-            ],
-        };
-        binaries.into_iter().flatten()
     }
 }
 

@@ -5,7 +5,7 @@
 
 pub(crate) mod resolver;
 
-use crate::BrowserArtifactRequest;
+use crate::{BrowserArtifactRequest, ChromeBinary};
 use ::chrome_for_testing::{
     Channel, Download, Platform, Version, VersionInChannel, VersionWithoutChannel,
 };
@@ -110,58 +110,90 @@ impl SelectedVersion {
         self.requested_artifacts
     }
 
-    /// Whether a Chrome download exists for this version on the detected platform.
+    /// Whether the release index lists a Chrome download for this version and platform.
+    ///
+    /// This reports availability, not what will be installed: a download is installed only if it
+    /// is part of [`Self::requested_artifacts`], and every requested artifact is guaranteed to be
+    /// available.
     #[must_use]
     pub fn has_chrome_download(&self) -> bool {
         self.chrome.is_some()
     }
 
-    /// Whether a Chrome Headless Shell download exists for this version on the detected platform.
+    /// Whether the release index lists a Chrome Headless Shell download for this version and
+    /// platform.
+    ///
+    /// Like [`Self::has_chrome_download`], this reports availability, not what will be installed.
     #[must_use]
     pub fn has_chrome_headless_shell_download(&self) -> bool {
         self.chrome_headless_shell.is_some()
     }
 
-    /// Whether a `ChromeDriver` download exists for this version on the detected platform.
+    /// Whether the release index lists a `ChromeDriver` download for this version and platform.
+    #[deprecated(
+        since = "0.13.0",
+        note = "always true: resolution only selects releases providing ChromeDriver"
+    )]
     #[must_use]
     pub fn has_chromedriver_download(&self) -> bool {
         self.chromedriver.is_some()
     }
 }
 
-impl SelectedVersion {
-    pub(crate) fn from_version(
-        v: &VersionWithoutChannel,
-        p: Platform,
-        requested_artifacts: BrowserArtifactRequest,
-    ) -> Self {
-        SelectedVersion {
-            channel: None,
-            version: v.version,
-            platform: p,
-            requested_artifacts,
-            chrome: v.downloads.chrome_for_platform(p).cloned(),
-            chrome_headless_shell: v.downloads.chrome_headless_shell_for_platform(p).cloned(),
-            chromedriver: v.downloads.chromedriver_for_platform(p).cloned(),
+/// One release's downloads for the target platform.
+///
+/// The known-good and per-channel manifests use structurally identical but distinct release
+/// types; both convert into this view, which holds the availability rules in one place.
+pub(crate) struct ReleaseDownloads<'a> {
+    chrome: Option<&'a Download>,
+    chrome_headless_shell: Option<&'a Download>,
+    chromedriver: Option<&'a Download>,
+}
+
+impl<'a> ReleaseDownloads<'a> {
+    pub(crate) fn of_known_good(release: &'a VersionWithoutChannel, platform: Platform) -> Self {
+        let downloads = &release.downloads;
+        Self {
+            chrome: downloads.chrome_for_platform(platform),
+            chrome_headless_shell: downloads.chrome_headless_shell_for_platform(platform),
+            chromedriver: downloads.chromedriver_for_platform(platform),
         }
     }
 
-    pub(crate) fn from_channel_version(
-        v: VersionInChannel,
-        p: Platform,
-        requested_artifacts: BrowserArtifactRequest,
-    ) -> Self {
-        let chrome_download = v.downloads.chrome_for_platform(p).cloned();
-        let chromedriver_download = v.downloads.chromedriver_for_platform(p).cloned();
+    pub(crate) fn of_channel(release: &'a VersionInChannel, platform: Platform) -> Self {
+        let downloads = &release.downloads;
+        Self {
+            chrome: downloads.chrome_for_platform(platform),
+            chrome_headless_shell: downloads.chrome_headless_shell_for_platform(platform),
+            chromedriver: downloads.chromedriver_for_platform(platform),
+        }
+    }
 
-        SelectedVersion {
-            channel: Some(v.channel),
-            version: v.version,
-            platform: p,
+    /// Whether the release provides `ChromeDriver` and every requested browser.
+    pub(crate) fn supports(&self, requested: BrowserArtifactRequest) -> bool {
+        self.chromedriver.is_some()
+            && (!requested.contains(ChromeBinary::Chrome) || self.chrome.is_some())
+            && (!requested.contains(ChromeBinary::ChromeHeadlessShell)
+                || self.chrome_headless_shell.is_some())
+    }
+}
+
+impl SelectedVersion {
+    pub(crate) fn new(
+        channel: Option<Channel>,
+        version: Version,
+        platform: Platform,
+        requested_artifacts: BrowserArtifactRequest,
+        downloads: &ReleaseDownloads<'_>,
+    ) -> Self {
+        Self {
+            channel,
+            version,
+            platform,
             requested_artifacts,
-            chrome: chrome_download,
-            chrome_headless_shell: v.downloads.chrome_headless_shell_for_platform(p).cloned(),
-            chromedriver: chromedriver_download,
+            chrome: downloads.chrome.cloned(),
+            chrome_headless_shell: downloads.chrome_headless_shell.cloned(),
+            chromedriver: downloads.chromedriver.cloned(),
         }
     }
 }

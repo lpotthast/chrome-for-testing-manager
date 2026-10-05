@@ -9,8 +9,8 @@ owns technical driver configuration, launch, the guarded process, and output sub
 and `src/cache/` trees own atomic artifact publication and cache locking respectively. The `src/version/` tree owns
 version types and release-manifest resolution, while `src/session/` owns scoped sessions, their builder, and Headless
 Shell. The lean `src/manager/` tree composes those domain services behind the lower-level manager facade.
-Cross-cutting policies, errors, ports, shared guarded-process scaffolding (`src/process_support.rs`), and abort-safe
-operation ownership remain focused root modules.
+Cross-cutting policies, errors, ports, and the shared guarded-process type (`src/process_support.rs`) remain focused
+root modules.
 
 Integration tests live in `tests/`, with reusable browser flows under `tests/common/`. Public documentation belongs in
 `README.md`; release notes belong in `CHANGELOG.md`.

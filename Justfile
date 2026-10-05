@@ -33,6 +33,7 @@ verify:
     cargo check --all-targets --all-features
     cargo check --lib --no-default-features
     cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
+    cargo clippy --all-targets --no-default-features -- -D warnings -W clippy::pedantic
     cargo test --all --all-features
     cargo test --doc --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features

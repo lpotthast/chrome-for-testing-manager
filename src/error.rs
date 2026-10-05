@@ -51,6 +51,30 @@ impl Display for ChromeForTestingArtifact {
     }
 }
 
+/// What an HTTP client that failed to build was meant for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HttpClientPurpose {
+    /// Requests to the Chrome for Testing release index and artifact downloads.
+    ChromeForTesting,
+
+    /// Loopback requests to `ChromeDriver` status and Chrome `DevTools` endpoints.
+    LocalProcess,
+
+    /// `WebDriver` commands of managed sessions.
+    WebDriver,
+}
+
+impl Display for HttpClientPurpose {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChromeForTesting => f.write_str("Chrome for Testing"),
+            Self::LocalProcess => f.write_str("local process"),
+            Self::WebDriver => f.write_str("WebDriver"),
+        }
+    }
+}
+
 /// Error contexts reported by chrome-for-testing-manager operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -64,31 +88,35 @@ pub enum ChromeForTestingError {
     #[error("Chrome for Testing requires an active multi-threaded Tokio runtime; none was found")]
     MissingRuntime,
 
-    /// The current Tokio runtime does not support async drop cleanup.
+    /// The current Tokio runtime is not multi-threaded.
+    ///
+    /// Guarded processes terminate on drop by blocking a runtime worker, which a current-thread
+    /// runtime cannot provide.
     #[error(
         "Chrome for Testing requires a multi-threaded Tokio runtime; detected {runtime_flavor:?}"
     )]
+    #[non_exhaustive]
     UnsupportedRuntime {
         /// The detected runtime flavor.
         runtime_flavor: RuntimeFlavor,
     },
 
-    /// The current platform is unsupported by chrome-for-testing.
-    #[error("unsupported chrome-for-testing platform")]
-    UnsupportedPlatform,
-
-    /// An internally owned operation task could not be joined.
-    #[error("failed to join {operation} operation task")]
-    JoinOperationTask {
-        /// The operation performed by the task.
-        operation: &'static str,
+    /// Chrome for Testing publishes no builds for the current OS and architecture.
+    #[error("Chrome for Testing does not support this platform (os: {os}, arch: {arch})")]
+    #[non_exhaustive]
+    UnsupportedPlatform {
+        /// The detected operating system, as in [`std::env::consts::OS`].
+        os: &'static str,
+        /// The detected CPU architecture, as in [`std::env::consts::ARCH`].
+        arch: &'static str,
     },
 
     /// An HTTP client could not be built.
     #[error("failed to build {purpose} HTTP client")]
+    #[non_exhaustive]
     BuildHttpClient {
-        /// The operation performed by the client.
-        purpose: &'static str,
+        /// What the client is used for.
+        purpose: HttpClientPurpose,
     },
 
     /* Cache. */
@@ -98,6 +126,7 @@ pub enum ChromeForTestingError {
 
     /// The cache directory could not be created.
     #[error("failed to create cache directory {}", .cache_dir.display())]
+    #[non_exhaustive]
     CreateCacheDir {
         /// The cache directory path.
         cache_dir: PathBuf,
@@ -105,6 +134,7 @@ pub enum ChromeForTestingError {
 
     /// A cache coordination lock file could not be opened.
     #[error("failed to open cache lock file {}", .path.display())]
+    #[non_exhaustive]
     OpenLockFile {
         /// The lock file path.
         path: PathBuf,
@@ -112,13 +142,15 @@ pub enum ChromeForTestingError {
 
     /// A cache coordination lock could not be acquired.
     #[error("failed to acquire cache lock {}", .path.display())]
+    #[non_exhaustive]
     AcquireCacheLock {
         /// The lock file path.
         path: PathBuf,
     },
 
-    /// The cache contains loaded or installing artifacts and cannot currently be cleared.
-    #[error("cache is in use and cannot be cleared: {}", .cache_dir.display())]
+    /// The cache contains loaded or installing artifacts and cannot currently be cleared or pruned.
+    #[error("cache is in use and cannot be cleared or pruned: {}", .cache_dir.display())]
+    #[non_exhaustive]
     CacheInUse {
         /// The cache directory path.
         cache_dir: PathBuf,
@@ -126,6 +158,7 @@ pub enum ChromeForTestingError {
 
     /// Entries in the cache directory could not be enumerated.
     #[error("failed to read cache directory {}", .cache_dir.display())]
+    #[non_exhaustive]
     ReadCacheDir {
         /// The cache directory path.
         cache_dir: PathBuf,
@@ -133,6 +166,7 @@ pub enum ChromeForTestingError {
 
     /// A cache entry could not be removed while clearing the cache.
     #[error("failed to remove cache entry {}", .path.display())]
+    #[non_exhaustive]
     RemoveCacheEntry {
         /// The cache entry path.
         path: PathBuf,
@@ -141,6 +175,7 @@ pub enum ChromeForTestingError {
     /* Version resolution. */
     /// The known-good version manifest could not be requested.
     #[error("failed to request versions for {version_request:?}")]
+    #[non_exhaustive]
     RequestVersions {
         /// The requested version selection.
         version_request: VersionRequest,
@@ -148,17 +183,21 @@ pub enum ChromeForTestingError {
 
     /// No known-good version matched the requested selection.
     #[error(
-        "could not determine a version for {version_request:?} satisfying {requested_artifacts:?}"
+        "could not determine a version for {version_request:?} on {platform} satisfying {requested_artifacts:?}"
     )]
+    #[non_exhaustive]
     NoMatchingVersion {
         /// The requested version selection.
         version_request: VersionRequest,
+        /// The platform the version must provide downloads for.
+        platform: Platform,
         /// Browser artifacts required by the resolution.
         requested_artifacts: BrowserArtifactRequest,
     },
 
     /// A browser package was requested that was not part of the resolved artifact set.
     #[error("{chrome_binary:?} was not resolved for version {version} on {platform}")]
+    #[non_exhaustive]
     BrowserArtifactNotResolved {
         /// The browser package requested by the caller.
         chrome_binary: ChromeBinary,
@@ -169,7 +208,11 @@ pub enum ChromeForTestingError {
     },
 
     /// A selected version was passed to a manager targeting another platform.
+    ///
+    /// Defensive: every manager targets the detected platform, so a [`crate::SelectedVersion`]
+    /// obtained through the public API cannot trigger this.
     #[error("selected version targets {selected}, but this manager targets {manager}")]
+    #[non_exhaustive]
     SelectedVersionPlatformMismatch {
         /// Platform stored in the selected version.
         selected: Platform,
@@ -178,7 +221,11 @@ pub enum ChromeForTestingError {
     },
 
     /// No download exists for the artifact at the selected version and platform.
+    ///
+    /// Defensive: resolution only selects versions providing every requested download, so a
+    /// [`crate::SelectedVersion`] obtained through the public API cannot trigger this.
     #[error("no {artifact} download for version {version} on {platform}")]
+    #[non_exhaustive]
     NoArtifactDownload {
         /// The artifact missing a download.
         artifact: ChromeForTestingArtifact,
@@ -189,8 +236,17 @@ pub enum ChromeForTestingError {
     },
 
     /* Installation. */
+    /// An installed package could not be checked for completeness.
+    #[error("failed to validate installed package {}", .path.display())]
+    #[non_exhaustive]
+    ValidateInstalledPackage {
+        /// Installed package directory.
+        path: PathBuf,
+    },
+
     /// An artifact's unique staging directory could not be created.
     #[error("failed to create staging directory {}", .path.display())]
+    #[non_exhaustive]
     CreateStagingDir {
         /// The staging directory path.
         path: PathBuf,
@@ -198,6 +254,7 @@ pub enum ChromeForTestingError {
 
     /// Stale staging data or an incomplete package could not be removed.
     #[error("failed to remove stale artifact data {}", .path.display())]
+    #[non_exhaustive]
     RemoveStaleArtifact {
         /// The stale artifact path.
         path: PathBuf,
@@ -205,6 +262,7 @@ pub enum ChromeForTestingError {
 
     /// The expected package root could not be derived from an executable path.
     #[error("invalid package executable path {}", .path.display())]
+    #[non_exhaustive]
     InvalidPackageExecutablePath {
         /// The invalid relative executable path.
         path: PathBuf,
@@ -212,6 +270,7 @@ pub enum ChromeForTestingError {
 
     /// Extraction completed without producing the expected executable.
     #[error("extracted package is missing executable {}", .path.display())]
+    #[non_exhaustive]
     MissingExtractedExecutable {
         /// The expected executable path.
         path: PathBuf,
@@ -219,6 +278,7 @@ pub enum ChromeForTestingError {
 
     /// An artifact completion marker could not be written.
     #[error("failed to write artifact completion marker {}", .path.display())]
+    #[non_exhaustive]
     WriteCompletionMarker {
         /// The marker path.
         path: PathBuf,
@@ -226,6 +286,7 @@ pub enum ChromeForTestingError {
 
     /// A completed package could not be atomically installed.
     #[error("failed to atomically install package from {} to {}", .from.display(), .to.display())]
+    #[non_exhaustive]
     InstallCompletedPackage {
         /// The completed staging package path.
         from: PathBuf,
@@ -236,6 +297,7 @@ pub enum ChromeForTestingError {
     /* Downloads and archives. */
     /// The download request failed or returned a non-success status.
     #[error("failed to download {artifact} from {url}")]
+    #[non_exhaustive]
     Download {
         /// The artifact being downloaded.
         artifact: ChromeForTestingArtifact,
@@ -245,6 +307,7 @@ pub enum ChromeForTestingError {
 
     /// The downloaded archive could not be written to disk.
     #[error("failed to write {artifact} download file {}", .path.display())]
+    #[non_exhaustive]
     WriteDownloadFile {
         /// The artifact being downloaded.
         artifact: ChromeForTestingArtifact,
@@ -254,6 +317,7 @@ pub enum ChromeForTestingError {
 
     /// The downloaded archive exceeded the download size safety limit.
     #[error("{artifact} download from {url} exceeds the safety limit of {max_size} bytes")]
+    #[non_exhaustive]
     DownloadTooLarge {
         /// The artifact being downloaded.
         artifact: ChromeForTestingArtifact,
@@ -264,21 +328,27 @@ pub enum ChromeForTestingError {
     },
 
     /// The downloaded archive could not be opened or was not a valid ZIP file.
-    #[error("downloaded file {} is not a readable ZIP archive", .path.display())]
+    #[error("downloaded {artifact} file {} is not a readable ZIP archive", .path.display())]
+    #[non_exhaustive]
     InvalidZip {
+        /// The artifact whose archive is invalid.
+        artifact: ChromeForTestingArtifact,
         /// The archive path.
         path: PathBuf,
     },
 
     /// The downloaded archive exceeded the decompressed size safety limit.
     #[error(
-        "downloaded ZIP archive {} decompressed size {size} exceeds safety limit {max_size}",
+        "downloaded {artifact} ZIP archive {} decompressed size {size} exceeds safety limit {max_size}",
         .path.display()
     )]
+    #[non_exhaustive]
     ZipTooLarge {
+        /// The artifact whose archive is too large.
+        artifact: ChromeForTestingArtifact,
         /// The archive path.
         path: PathBuf,
-        /// The reported decompressed size in bytes.
+        /// The decompressed size in bytes extracted before the limit was hit.
         size: u64,
         /// The configured maximum decompressed size in bytes.
         max_size: u64,
@@ -286,10 +356,13 @@ pub enum ChromeForTestingError {
 
     /// The downloaded archive contained more entries than the safety limit allows.
     #[error(
-        "downloaded ZIP archive {} contains {entries} entries, exceeding safety limit {max_entries}",
+        "downloaded {artifact} ZIP archive {} contains {entries} entries, exceeding safety limit {max_entries}",
         .path.display()
     )]
+    #[non_exhaustive]
     ZipTooManyEntries {
+        /// The artifact whose archive has too many entries.
+        artifact: ChromeForTestingArtifact,
         /// The archive path.
         path: PathBuf,
         /// The number of entries reported by the archive.
@@ -300,11 +373,14 @@ pub enum ChromeForTestingError {
 
     /// The downloaded archive could not be extracted.
     #[error(
-        "failed to extract ZIP archive {} to {}",
+        "failed to extract {artifact} ZIP archive {} to {}",
         .path.display(),
         .unpack_dir.display()
     )]
+    #[non_exhaustive]
     ExtractZip {
+        /// The artifact whose archive could not be extracted.
+        artifact: ChromeForTestingArtifact,
         /// The archive path.
         path: PathBuf,
         /// The destination directory.
@@ -314,6 +390,7 @@ pub enum ChromeForTestingError {
     /* Process lifecycle. */
     /// A managed child process could not be spawned.
     #[error("failed to spawn {artifact} process {}", .path.display())]
+    #[non_exhaustive]
     SpawnProcess {
         /// The artifact whose process could not be spawned.
         artifact: ChromeForTestingArtifact,
@@ -325,6 +402,7 @@ pub enum ChromeForTestingError {
     #[error(
         "Chrome Headless Shell sessions require --remote-debugging-port=<0-65535> over TCP; unsupported argument {arg:?}"
     )]
+    #[non_exhaustive]
     InvalidHeadlessShellRemoteDebuggingArg {
         /// The unsupported browser argument.
         arg: String,
@@ -334,6 +412,7 @@ pub enum ChromeForTestingError {
     #[error(
         "Chrome Headless Shell sessions require exactly one TCP remote debugging port; conflicting arguments {first_arg:?} and {second_arg:?}"
     )]
+    #[non_exhaustive]
     ConflictingHeadlessShellRemoteDebuggingArgs {
         /// The first configured remote debugging port argument.
         first_arg: String,
@@ -345,13 +424,17 @@ pub enum ChromeForTestingError {
     #[error(
         "Chrome Headless Shell cannot apply goog:chromeOptions.{option} through an attached session"
     )]
+    #[non_exhaustive]
     UnsupportedHeadlessShellCapability {
         /// Unsupported Chrome option name.
         option: String,
     },
 
-    /// A managed child process closed its startup output before reporting readiness.
+    /// A managed child process closed its startup output before reporting readiness, but its exit
+    /// could not be observed shortly afterwards. If the exit is observed,
+    /// [`Self::ExitedDuringStartup`] is reported instead.
     #[error("{artifact} {} closed its startup output before reporting readiness", .path.display())]
+    #[non_exhaustive]
     StartupOutputClosed {
         /// The artifact whose process closed its output.
         artifact: ChromeForTestingArtifact,
@@ -364,6 +447,7 @@ pub enum ChromeForTestingError {
         "chromedriver {} reported port {reported}, but port {requested} was requested",
         .path.display()
     )]
+    #[non_exhaustive]
     ChromeDriverPortMismatch {
         /// The chromedriver executable path.
         path: PathBuf,
@@ -375,6 +459,7 @@ pub enum ChromeForTestingError {
 
     /// A managed child process exited before it became ready.
     #[error("{artifact} {} exited during startup with {status}", .path.display())]
+    #[non_exhaustive]
     ExitedDuringStartup {
         /// The artifact whose process exited.
         artifact: ChromeForTestingArtifact,
@@ -384,8 +469,9 @@ pub enum ChromeForTestingError {
         status: std::process::ExitStatus,
     },
 
-    /// A managed child process did not report startup before the timeout.
+    /// A managed child process did not print its startup line before the timeout.
     #[error("{artifact} {} did not report startup within {timeout:?}", .path.display())]
+    #[non_exhaustive]
     WaitForStartup {
         /// The artifact whose process did not start in time.
         artifact: ChromeForTestingArtifact,
@@ -395,27 +481,60 @@ pub enum ChromeForTestingError {
         timeout: Duration,
     },
 
+    /// The output of a managed child process could not be read during startup.
+    #[error("failed to read startup output of {artifact} {}", .path.display())]
+    #[non_exhaustive]
+    ReadStartupOutput {
+        /// The artifact whose output could not be read.
+        artifact: ChromeForTestingArtifact,
+        /// The executable path.
+        path: PathBuf,
+    },
+
+    /// A managed child process printed its startup line but no recognizable value in it.
+    #[error("{artifact} {} reported startup in an unrecognized format: {line:?}", .path.display())]
+    #[non_exhaustive]
+    UnrecognizedStartupOutput {
+        /// The artifact whose startup line could not be parsed.
+        artifact: ChromeForTestingArtifact,
+        /// The executable path.
+        path: PathBuf,
+        /// The unparsable startup line.
+        line: String,
+    },
+
+    /// `ChromeDriver` reported startup, but its status endpoint did not report readiness before the
+    /// startup deadline.
+    #[error(
+        "chromedriver {} on port {port} did not report a ready /status within {timeout:?}",
+        .path.display()
+    )]
+    #[non_exhaustive]
+    ChromeDriverNotReady {
+        /// The chromedriver executable path.
+        path: PathBuf,
+        /// The port the status endpoint was probed on.
+        port: Port,
+        /// The startup deadline.
+        timeout: Duration,
+    },
+
     /// An initial browser page could not be created through the `DevTools` endpoint.
     #[error("failed to create initial browser page through DevTools at {debugger_address}")]
+    #[non_exhaustive]
     CreateInitialBrowserPage {
         /// The `DevTools` HTTP endpoint address.
         debugger_address: String,
     },
 
-    /// A spawned process could not be terminated during startup cleanup.
-    #[error("failed to terminate {artifact} during startup cleanup for {}", .path.display())]
-    TerminateDuringStartup {
-        /// The artifact whose process could not be terminated.
-        artifact: ChromeForTestingArtifact,
-        /// The spawned executable path.
-        path: PathBuf,
-    },
-
-    /// A managed child process could not be terminated.
-    #[error("failed to terminate {artifact} process")]
+    /// A managed child process could not be terminated, neither gracefully nor by force.
+    #[error("failed to terminate {artifact} process {}", .path.display())]
+    #[non_exhaustive]
     TerminateProcess {
         /// The artifact whose process could not be terminated.
         artifact: ChromeForTestingArtifact,
+        /// The executable path.
+        path: PathBuf,
     },
 
     /* Session lifecycle. */
@@ -424,6 +543,7 @@ pub enum ChromeForTestingError {
         "failed to prepare Chrome capabilities for {}",
         .browser_executable.display()
     )]
+    #[non_exhaustive]
     PrepareChromeCapabilities {
         /// The browser executable path.
         browser_executable: PathBuf,
@@ -435,6 +555,7 @@ pub enum ChromeForTestingError {
 
     /// The `WebDriver` session could not be started.
     #[error("failed to start WebDriver session on port {port}")]
+    #[non_exhaustive]
     StartWebDriverSession {
         /// The chromedriver port.
         port: Port,
@@ -444,16 +565,10 @@ pub enum ChromeForTestingError {
     #[error("session callback failed")]
     RunSessionCallback,
 
-    /// The `WebDriver` session could not be closed.
+    /// The `WebDriver` session could not be closed, or did not answer within
+    /// the `session_cleanup_timeout` of [`crate::LifecyclePolicy`].
     #[error("failed to quit WebDriver session")]
     QuitSession,
-
-    /// Browser-session cleanup exceeded its independent lifecycle deadline.
-    #[error("browser-session cleanup exceeded {timeout:?}")]
-    SessionCleanupTimeout {
-        /// Cleanup deadline that elapsed.
-        timeout: Duration,
-    },
 }
 
 pub(crate) fn operation_result_with_cleanup<T, U>(
@@ -464,13 +579,21 @@ pub(crate) fn operation_result_with_cleanup<T, U>(
         Ok(value) => cleanup_result.map(|_| value),
         Err(mut operation_err) => {
             if let Err(cleanup_err) = cleanup_result {
-                operation_err
-                    .children_mut()
-                    .push(cleanup_err.into_dynamic().into_cloneable());
+                attach_child(&mut operation_err, cleanup_err);
             }
             Err(operation_err)
         }
     }
+}
+
+/// Attach `child` beneath `report` as a secondary failure.
+pub(crate) fn attach_child<C: ?Sized>(
+    report: &mut Report<ChromeForTestingError>,
+    child: Report<C>,
+) {
+    report
+        .children_mut()
+        .push(child.into_dynamic().into_cloneable());
 }
 
 #[cfg(test)]

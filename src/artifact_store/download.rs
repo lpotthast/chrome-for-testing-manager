@@ -35,11 +35,12 @@ pub(crate) async fn download_artifact_archive(
         artifact,
         path: archive_path.to_owned(),
     };
-    let response = crate::await_or_cancelled(cancellation, client.get(url).timeout(timeout).send())
-        .await?
-        .context_with(download_error)?
-        .error_for_status()
-        .context_with(download_error)?;
+    let mut response =
+        crate::await_or_cancelled(cancellation, client.get(url).timeout(timeout).send())
+            .await?
+            .context_with(download_error)?
+            .error_for_status()
+            .context_with(download_error)?;
 
     let too_large_error = || ChromeForTestingError::DownloadTooLarge {
         artifact,
@@ -62,7 +63,6 @@ pub(crate) async fn download_artifact_archive(
     let mut file = tokio::fs::File::create(archive_path)
         .await
         .context_with(write_error)?;
-    let mut response = response;
     let mut downloaded_size = 0_u64;
 
     loop {

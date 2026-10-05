@@ -2,8 +2,7 @@
 //!
 //! Domain services live in their owning modules; the manager wires them together and provides
 //! cancellation-aware public orchestration methods. See the
-//! [crate-level cancellation section](crate#cancellation-and-drop-safety) for the drop-safety
-//! guarantee behind the cleanup-sensitive methods.
+//! [crate-level cancellation section](crate#cancellation-and-drop-safety).
 
 pub(crate) mod config;
 
@@ -11,15 +10,15 @@ use crate::artifact_store::ArtifactStore;
 use crate::browser::{BrowserArtifactRequest, ChromeBinary, LoadedBrowserPackage};
 use crate::cache::{CacheDir, CachePruneResult};
 use crate::chromedriver::ChromeDriverConfig;
-use crate::chromedriver::process::{ChromeDriverLaunchRequest, ChromeDriverProcess};
+use crate::chromedriver::process::ChromeDriverProcess;
+use crate::error::HttpClientPurpose;
 use crate::manager::config::ChromeForTestingManagerConfig;
-use crate::operation::AbortSafeOperation;
 use crate::policy::LifecyclePolicy;
 use crate::version::resolver::VersionResolver;
 use crate::version::{SelectedVersion, VersionRequest};
 use crate::{CancellationToken, ChromeForTestingError, Result};
 use ::chrome_for_testing::Platform;
-use rootcause::{Report, prelude::ResultExt, report};
+use rootcause::prelude::ResultExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -33,6 +32,9 @@ pub struct ChromeForTestingManager {
     artifact_store: ArtifactStore,
     /// No-proxy client for loopback requests against `ChromeDriver` and `DevTools`.
     local_client: reqwest::Client,
+    /// No-proxy client for `WebDriver` sessions, bounded by the `WebDriver` request deadline.
+    #[cfg(feature = "thirtyfour")]
+    webdriver_client: reqwest::Client,
     lifecycle: LifecyclePolicy,
     platform: Platform,
 }
@@ -52,7 +54,7 @@ impl ChromeForTestingManager {
     /// # Errors
     ///
     /// Returns an error when the platform, cache, or HTTP clients cannot be prepared.
-    pub fn new_with_cache_dir(cache_dir: PathBuf) -> Result<Self> {
+    pub fn new_with_cache_dir(cache_dir: impl Into<PathBuf>) -> Result<Self> {
         Self::new_with_config(
             ChromeForTestingManagerConfig::builder()
                 .cache_dir(cache_dir)
@@ -64,44 +66,59 @@ impl ChromeForTestingManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when the platform, cache, or one of the two HTTP clients cannot be
-    /// prepared.
+    /// Returns an error when the platform, cache, or HTTP clients cannot be prepared.
     pub fn new_with_config(config: ChromeForTestingManagerConfig) -> Result<Self> {
-        let (cache_dir, network, lifecycle) = config.into_parts();
+        let ChromeForTestingManagerConfig {
+            cache_dir,
+            network,
+            lifecycle,
+        } = config;
         let cache_dir = match cache_dir {
             Some(cache_dir) => CacheDir::create_at(cache_dir)?,
             None => CacheDir::get_or_create()?,
         };
-        let platform = Platform::detect().map_err(Self::unsupported_platform_error)?;
+        let platform = Platform::detect().context(ChromeForTestingError::UnsupportedPlatform {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+        })?;
+        let build_client =
+            |builder: reqwest::ClientBuilder, timeout: Duration, purpose: HttpClientPurpose| {
+                builder
+                    .connect_timeout(network.connect_timeout())
+                    .timeout(timeout)
+                    .build()
+                    .context(ChromeForTestingError::BuildHttpClient { purpose })
+            };
         // One client for all requests leaving the machine. Its default deadline covers manifest
         // requests; artifact downloads override it per request.
-        let external_client = reqwest::Client::builder()
-            .connect_timeout(network.connect_timeout())
-            .timeout(network.manifest_timeout())
-            .build()
-            .context(ChromeForTestingError::BuildHttpClient {
-                purpose: "Chrome for Testing",
-            })?;
-        let local_client = reqwest::Client::builder()
-            .no_proxy()
-            .connect_timeout(network.connect_timeout())
-            .timeout(LOCAL_REQUEST_TIMEOUT)
-            .build()
-            .context(ChromeForTestingError::BuildHttpClient {
-                purpose: "local process",
-            })?;
-        let resolver = VersionResolver::new(external_client.clone(), platform);
-        let artifact_store = ArtifactStore::new(
-            cache_dir,
-            external_client,
-            network.artifact_download_timeout(),
-            platform,
-        );
+        let external_client = build_client(
+            reqwest::Client::builder(),
+            network.manifest_timeout(),
+            HttpClientPurpose::ChromeForTesting,
+        )?;
+        let local_client = build_client(
+            reqwest::Client::builder().no_proxy(),
+            LOCAL_REQUEST_TIMEOUT,
+            HttpClientPurpose::LocalProcess,
+        )?;
+        #[cfg(feature = "thirtyfour")]
+        let webdriver_client = build_client(
+            reqwest::Client::builder().no_proxy(),
+            network.webdriver_request_timeout(),
+            HttpClientPurpose::WebDriver,
+        )?;
 
         Ok(Self {
-            resolver,
-            artifact_store,
+            resolver: VersionResolver::new(external_client.clone(), platform),
+            artifact_store: ArtifactStore::new(
+                cache_dir,
+                external_client,
+                network.artifact_download_timeout(),
+                platform,
+            ),
             local_client,
+            #[cfg(feature = "thirtyfour")]
+            webdriver_client,
             lifecycle,
             platform,
         })
@@ -119,16 +136,17 @@ impl ChromeForTestingManager {
         self.platform
     }
 
-    /// Clear installed artifacts when no download or loaded package holds a cache lease.
+    /// Remove every cached version when no download or loaded package holds a cache lease.
     ///
-    /// This operation deliberately does not wait for users of the cache. It returns
-    /// [`ChromeForTestingError::CacheInUse`] immediately instead.
+    /// Unrecognized root entries and the lock namespace are left untouched. This operation does
+    /// not wait for users of the cache: after a brief retry (about 100 ms) covering lock
+    /// handover, it returns [`ChromeForTestingError::CacheInUse`].
     ///
     /// # Errors
     ///
     /// Returns an error if the cache is in use or its entries cannot be removed.
     pub async fn clear_cache(&self) -> Result<()> {
-        self.artifact_store.clear().await
+        self.artifact_store.cache_dir().clear().await
     }
 
     /// Remove cached version directories except for the explicitly retained versions.
@@ -143,7 +161,10 @@ impl ChromeForTestingManager {
         &self,
         retained_versions: &[chrome_for_testing::Version],
     ) -> Result<CachePruneResult> {
-        self.artifact_store.prune(retained_versions).await
+        self.artifact_store
+            .cache_dir()
+            .prune(retained_versions)
+            .await
     }
 
     /// Resolve a version request against the Chrome for Testing release manifest.
@@ -166,8 +187,9 @@ impl ChromeForTestingManager {
     /// Atomically install requested browser packages and their matching `ChromeDriver`.
     ///
     /// Concurrent artifact transactions are drained on every outcome, and cancellation waits for
-    /// extraction and staging cleanup before returning; see the
-    /// [crate-level cancellation section](crate#cancellation-and-drop-safety).
+    /// extraction and staging cleanup before returning. Dropping the returned future cancels the
+    /// installation as well: an in-flight extraction stops at its next chunk, and its staging
+    /// directory is removed by the next installation of that artifact.
     ///
     /// # Errors
     ///
@@ -179,20 +201,18 @@ impl ChromeForTestingManager {
         selected: &SelectedVersion,
         cancellation: CancellationToken,
     ) -> Result<Vec<LoadedBrowserPackage>> {
-        let selected = selected.clone();
-        self.run_installation(
-            cancellation,
-            move |store, operation_cancellation| async move {
-                store.download(&selected, operation_cancellation).await
-            },
-        )
-        .await
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        self.artifact_store
+            .install(selected, selected.requested_artifacts(), cancellation)
+            .await
     }
 
     /// Atomically install one browser package and its matching `ChromeDriver`.
     ///
-    /// The binary must be part of the resolved artifact set recorded in `selected`. Behaves like
-    /// [`Self::download`] otherwise.
+    /// The binary must be part of the resolved artifact set recorded in `selected`. Only
+    /// `chrome_binary` and `ChromeDriver` are installed, even if `selected` resolved more. Behaves
+    /// like [`Self::download`] otherwise.
     ///
     /// # Errors
     ///
@@ -204,42 +224,29 @@ impl ChromeForTestingManager {
         chrome_binary: ChromeBinary,
         cancellation: CancellationToken,
     ) -> Result<LoadedBrowserPackage> {
-        let selected = selected.clone();
-        self.run_installation(
-            cancellation,
-            move |store, operation_cancellation| async move {
-                store
-                    .download_for(&selected, chrome_binary, operation_cancellation)
-                    .await
-            },
-        )
-        .await
-    }
+        use rootcause::option_ext::OptionExt;
 
-    /// Run an installation closure over a cloned artifact store inside an abort-safe operation.
-    async fn run_installation<T, F, Fut>(
-        &self,
-        cancellation: CancellationToken,
-        start: F,
-    ) -> Result<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(ArtifactStore, CancellationToken) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<T>> + Send + 'static,
-    {
-        let artifact_store = self.artifact_store.clone();
-        AbortSafeOperation::run(
-            "artifact installation",
-            cancellation,
-            move |operation_cancellation| start(artifact_store, operation_cancellation),
-        )
-        .await
+        let not_resolved = || ChromeForTestingError::BrowserArtifactNotResolved {
+            chrome_binary,
+            version: selected.version(),
+            platform: selected.platform(),
+        };
+        if !selected.requested_artifacts().contains(chrome_binary) {
+            return Err(rootcause::report!(not_resolved()));
+        }
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        self.artifact_store
+            .install(selected, chrome_binary.into(), cancellation)
+            .await?
+            .pop()
+            .context_with(not_resolved)
     }
 
     /// Launch the validated package's matching `ChromeDriver`.
     ///
-    /// Cancellation terminates any process acquired before the error is returned; see the
-    /// [crate-level cancellation section](crate#cancellation-and-drop-safety).
+    /// Cancellation terminates a process spawned before the error is returned. Dropping the
+    /// returned future terminates it too, synchronously on a runtime worker.
     ///
     /// # Errors
     ///
@@ -250,26 +257,13 @@ impl ChromeForTestingManager {
         config: ChromeDriverConfig,
         cancellation: CancellationToken,
     ) -> Result<ChromeDriverProcess> {
-        let status_client = self.local_client.clone();
-        let lifecycle = self.lifecycle.clone();
-        let executable = loaded.chromedriver_executable().to_owned();
-        let cache_lease = loaded.cache_lease();
-        AbortSafeOperation::run(
-            "ChromeDriver launch",
-            cancellation,
-            move |operation_cancellation| async move {
-                ChromeDriverProcess::launch(
-                    ChromeDriverLaunchRequest {
-                        executable,
-                        cache_lease,
-                        config,
-                        cancellation: operation_cancellation,
-                    },
-                    &status_client,
-                    &lifecycle,
-                )
-                .await
-            },
+        ChromeDriverProcess::launch(
+            loaded.chromedriver_executable(),
+            loaded.cache_lease(),
+            config,
+            &cancellation,
+            &self.local_client,
+            &self.lifecycle,
         )
         .await
     }
@@ -285,60 +279,41 @@ impl ChromeForTestingManager {
         &self,
         loaded: &LoadedBrowserPackage,
     ) -> Result<thirtyfour::ChromeCapabilities> {
+        use rootcause::option_ext::OptionExt;
         use thirtyfour::ChromiumLikeCapabilities;
 
         let browser_executable = loaded.browser_executable();
-        let browser_executable_string = browser_executable.to_str().ok_or_else(|| {
-            report!(ChromeForTestingError::PrepareChromeCapabilities {
-                browser_executable: browser_executable.to_owned(),
-            })
-        })?;
+        let prepare_error = || ChromeForTestingError::PrepareChromeCapabilities {
+            browser_executable: browser_executable.to_owned(),
+        };
+        let browser_executable_string = browser_executable.to_str().context_with(prepare_error)?;
         let mut caps = thirtyfour::ChromeCapabilities::new();
-        caps.set_headless()
-            .context(ChromeForTestingError::PrepareChromeCapabilities {
-                browser_executable: browser_executable.to_owned(),
-            })?;
-        if loaded.chrome_binary() == ChromeBinary::Chrome {
-            caps.set_binary(browser_executable_string).context(
-                ChromeForTestingError::PrepareChromeCapabilities {
-                    browser_executable: browser_executable.to_owned(),
-                },
-            )?;
-        }
+        caps.set_headless().context_with(prepare_error)?;
+        caps.set_binary(browser_executable_string)
+            .context_with(prepare_error)?;
         Ok(caps)
     }
 
+    /// The no-proxy HTTP client for `ChromeDriver` status and `DevTools` requests.
     #[cfg(feature = "thirtyfour")]
-    pub(crate) async fn launch_headless_shell_session(
-        &self,
-        loaded: &LoadedBrowserPackage,
-        caps: &mut thirtyfour::ChromeCapabilities,
-        cancellation: &CancellationToken,
-    ) -> Result<crate::session::headless_shell::HeadlessShellSession> {
-        crate::session::headless_shell::HeadlessShellSession::launch(
-            loaded,
-            caps,
-            self.lifecycle.graceful_shutdown().clone(),
-            &self.local_client,
-            &self.lifecycle,
-            cancellation,
-        )
-        .await
+    pub(crate) const fn local_client(&self) -> &reqwest::Client {
+        &self.local_client
+    }
+
+    /// The no-proxy HTTP client for `WebDriver` sessions.
+    #[cfg(feature = "thirtyfour")]
+    pub(crate) const fn webdriver_client(&self) -> &reqwest::Client {
+        &self.webdriver_client
     }
 
     #[cfg(feature = "thirtyfour")]
-    pub(crate) const fn session_cleanup_timeout(&self) -> Duration {
-        self.lifecycle.session_cleanup_timeout()
+    pub(crate) const fn lifecycle(&self) -> &LifecyclePolicy {
+        &self.lifecycle
     }
 
     #[cfg(test)]
     pub(crate) fn set_manifest_base_url(&mut self, base_url: reqwest::Url) {
         self.resolver.set_manifest_base_url(base_url);
-    }
-
-    fn unsupported_platform_error(error: impl std::fmt::Display) -> Report<ChromeForTestingError> {
-        report!(ChromeForTestingError::UnsupportedPlatform)
-            .attach(format!("chrome-for-testing error:\n{error}"))
     }
 }
 
@@ -346,7 +321,7 @@ impl ChromeForTestingManager {
 mod tests {
     use super::*;
     use crate::NetworkPolicy;
-    use crate::artifact_store::completion_marker_name;
+    use crate::artifact_store::COMPLETION_MARKER;
     use crate::test_support::{
         FixtureServer, ResponseSpec, TestDirectory, contains_transaction_residue,
         large_artifact_zip, platform_artifact_zips,
@@ -354,6 +329,7 @@ mod tests {
     use assertr::prelude::*;
     use chrome_for_testing::Download;
     use chrome_for_testing::Version;
+    use rootcause::Report;
     use std::collections::HashMap;
     use std::result::Result;
 
@@ -581,6 +557,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn download_for_installs_only_the_requested_browser() -> Result<(), Report> {
+        let directory = TestDirectory::new("download-for-one-browser")?;
+        let manager = test_manager(&directory, Duration::from_secs(5))?;
+        let (browser_zip, driver_zip) = platform_artifact_zips(manager.platform)?;
+        let server = FixtureServer::start(HashMap::from([
+            ("/browser.zip".to_owned(), ResponseSpec::body(browser_zip)),
+            ("/driver.zip".to_owned(), ResponseSpec::body(driver_zip)),
+            (
+                "/headless-shell.zip".to_owned(),
+                ResponseSpec::body(b"not a zip".to_vec()),
+            ),
+        ]))
+        .await?;
+        let mut selected = selected_version(&manager, &server);
+        selected.requested_artifacts = BrowserArtifactRequest::Both;
+        selected.chrome_headless_shell = Some(Download {
+            platform: manager.platform,
+            url: server.url("/headless-shell.zip"),
+        });
+
+        let loaded = manager
+            .download_for(&selected, ChromeBinary::Chrome, CancellationToken::new())
+            .await?;
+
+        assert_that!(loaded.chrome_binary()).is_equal_to(ChromeBinary::Chrome);
+        assert_that!(server.hits("/headless-shell.zip")).is_equal_to(0);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn invalid_and_legacy_markers_are_reinstalled_exactly_once() -> Result<(), Report> {
         let directory = TestDirectory::new("marker-migration")?;
         let manager = test_manager(&directory, Duration::from_secs(5))?;
@@ -653,7 +659,7 @@ mod tests {
         let lease = manager
             .artifact_store
             .cache_dir()
-            .acquire_shared(CancellationToken::new())
+            .acquire_shared(&CancellationToken::new())
             .await?;
         let loaded = LoadedBrowserPackage::new(
             ChromeBinary::Chrome,
@@ -724,7 +730,7 @@ mod tests {
             .join(version)
             .join(platform)
             .join(package)
-            .join(completion_marker_name())
+            .join(COMPLETION_MARKER)
     }
 
     async fn wait_for_partial_browser_extraction(
@@ -748,7 +754,7 @@ mod tests {
                         if entry
                             .file_name()
                             .to_string_lossy()
-                            .starts_with(".staging-chrome-")
+                            .starts_with(".staging.chrome.")
                             && tokio::fs::metadata(
                                 entry
                                     .path()
@@ -763,7 +769,7 @@ mod tests {
                         }
                     }
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await

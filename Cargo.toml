@@ -36,7 +36,7 @@ unwrap-infallible = "1.0.0"
 zip = { version = "8.0.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-assertr = "0.6.0"
+assertr = "0.7.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 futures = "0.3.0"
 tokio = { version = "1.52.3", features = ["io-util", "net", "sync"] }

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zip::ZipWriter;
@@ -80,6 +81,8 @@ impl ResponseSpec {
 struct FixtureState {
     routes: HashMap<String, ResponseSpec>,
     counters: HashMap<String, AtomicUsize>,
+    /// Notified after every counted hit.
+    hit: Notify,
     cancellation: CancellationToken,
 }
 
@@ -101,6 +104,7 @@ impl FixtureServer {
                 .map(|path| (path.clone(), AtomicUsize::new(0)))
                 .collect(),
             routes,
+            hit: Notify::new(),
             cancellation: cancellation.clone(),
         });
         let app = Router::new()
@@ -141,8 +145,13 @@ impl FixtureServer {
 
     pub(crate) async fn wait_for_hits(&self, path: &str, expected: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while self.hits(path) < expected {
-                tokio::task::yield_now().await;
+            loop {
+                // Register interest before checking, so a hit in between is not missed.
+                let hit = self.state.hit.notified();
+                if self.hits(path) >= expected {
+                    return;
+                }
+                hit.await;
             }
         })
         .await
@@ -164,6 +173,7 @@ async fn handle_request(State(state): State<Arc<FixtureState>>, request: Request
     };
     if let Some(counter) = state.counters.get(path) {
         counter.fetch_add(1, Ordering::AcqRel);
+        state.hit.notify_waiters();
     }
 
     match spec {
@@ -246,4 +256,22 @@ fn contains_transaction_residue_blocking(path: &Path) -> std::io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Write an executable script, e.g. a fake `chromedriver`.
+#[cfg(unix)]
+pub(crate) async fn write_executable(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::write(path, contents).await?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await
+}
+
+/// A shared lease on a (new) cache at `cache_dir`.
+pub(crate) async fn cache_lease(
+    cache_dir: &Path,
+) -> Result<crate::cache::CacheLease, rootcause::Report<crate::ChromeForTestingError>> {
+    crate::cache::CacheDir::create_at(cache_dir.to_owned())?
+        .acquire_shared(&CancellationToken::new())
+        .await
 }

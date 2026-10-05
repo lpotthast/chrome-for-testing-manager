@@ -1,32 +1,25 @@
-//! Typed file-lock states used to coordinate cache readers, installers, and mutations.
+//! File locks coordinating cache readers, installers, and mutations.
 //!
-//! Raw files never escape this module. Successful acquisition yields a purpose-specific RAII
-//! guard, preventing callers from confusing shared cache leases, artifact transactions, and
-//! cache-wide mutation ownership.
+//! Raw files never escape this module. Each acquisition yields a purpose-specific RAII guard, so
+//! shared cache leases, artifact transactions, and cache-wide mutation ownership cannot be
+//! confused. A lock is released when its guard (and, for a lease, every clone) is dropped.
 
 use crate::{CancellationToken, ChromeForTestingError};
 use rootcause::{Report, prelude::ResultExt};
 use std::fs::{File, TryLockError};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-#[derive(Clone)]
-struct SharedFileLock {
-    _file: Arc<File>,
-}
-
-struct ExclusiveFileLock {
-    _file: File,
-}
+type Result<T> = std::result::Result<T, Report<ChromeForTestingError>>;
 
 /// A shared, cache-wide lease retained while installed paths are in use.
 #[derive(Clone)]
 pub(crate) struct CacheLease {
-    _lock: SharedFileLock,
+    _file: Arc<File>,
 }
 
 impl std::fmt::Debug for CacheLease {
@@ -37,104 +30,89 @@ impl std::fmt::Debug for CacheLease {
 
 /// An exclusive lock for one `(version, platform, artifact)` installation transaction.
 pub(crate) struct ArtifactLock {
-    _lock: ExclusiveFileLock,
+    _file: File,
 }
 
-impl std::fmt::Debug for ArtifactLock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ArtifactLock").finish_non_exhaustive()
-    }
+/// Exclusive ownership of the whole cache, excluding every lease.
+pub(super) struct CacheMutationGuard {
+    _file: File,
 }
 
-pub(super) struct CacheMutationGuard(#[allow(dead_code)] ExclusiveFileLock);
-
-pub(super) struct UnlockedFileLock {
-    file: File,
-    path: PathBuf,
+/// Wait for a shared lock on `path`.
+pub(super) async fn lease(path: &Path, cancellation: &CancellationToken) -> Result<CacheLease> {
+    let file = wait(path, cancellation, File::try_lock_shared).await?;
+    Ok(CacheLease {
+        _file: Arc::new(file),
+    })
 }
 
-pub(super) enum TryAcquire<T> {
-    Acquired(T),
-    Contended,
+/// Wait for an exclusive lock on `path`.
+pub(super) async fn artifact_lock(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<ArtifactLock> {
+    let file = wait(path, cancellation, File::try_lock).await?;
+    Ok(ArtifactLock { _file: file })
 }
 
-impl UnlockedFileLock {
-    pub(super) async fn open(path: PathBuf) -> Result<Self, Report<ChromeForTestingError>> {
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .await
-            .context(ChromeForTestingError::OpenLockFile { path: path.clone() })?;
-        Ok(Self {
-            file: file.into_std().await,
-            path,
-        })
-    }
-
-    pub(super) async fn wait_shared(
-        self,
-        cancellation: CancellationToken,
-    ) -> Result<CacheLease, Report<ChromeForTestingError>> {
-        self.wait(cancellation, File::try_lock_shared)
-            .await
-            .map(|file| CacheLease {
-                _lock: SharedFileLock {
-                    _file: Arc::new(file),
-                },
-            })
-    }
-
-    pub(super) async fn wait_exclusive(
-        self,
-        cancellation: CancellationToken,
-    ) -> Result<ArtifactLock, Report<ChromeForTestingError>> {
-        self.wait(cancellation, File::try_lock)
-            .await
-            .map(|file| ArtifactLock {
-                _lock: ExclusiveFileLock { _file: file },
-            })
-    }
-
-    pub(super) fn try_exclusive(
-        self,
-    ) -> Result<TryAcquire<CacheMutationGuard>, Report<ChromeForTestingError>> {
-        match self.file.try_lock() {
-            Ok(()) => Ok(TryAcquire::Acquired(CacheMutationGuard(
-                ExclusiveFileLock { _file: self.file },
-            ))),
-            Err(TryLockError::WouldBlock) => Ok(TryAcquire::Contended),
-            Err(TryLockError::Error(error)) => Err(Report::new_sendsync(error)
-                .context(ChromeForTestingError::AcquireCacheLock { path: self.path })),
+/// Try to take an exclusive lock on `path`, making `attempts` attempts `delay` apart. Returns
+/// `None` while the lock stays contended.
+pub(super) async fn try_mutation_guard(
+    path: &Path,
+    attempts: u32,
+    delay: Duration,
+) -> Result<Option<CacheMutationGuard>> {
+    let file = open(path).await?;
+    for attempt in 1..=attempts {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(CacheMutationGuard { _file: file })),
+            Err(TryLockError::WouldBlock) if attempt < attempts => tokio::time::sleep(delay).await,
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => return Err(acquire_error(error, path)),
         }
     }
+    Ok(None)
+}
 
-    /// Poll the non-blocking lock acquisition until it succeeds or the token is cancelled.
-    async fn wait(
-        self,
-        cancellation: CancellationToken,
-        try_lock: fn(&File) -> std::result::Result<(), TryLockError>,
-    ) -> Result<File, Report<ChromeForTestingError>> {
-        let Self { file, path } = self;
-        loop {
-            crate::check_cancelled(&cancellation)?;
-
-            match try_lock(&file) {
-                Ok(()) => return Ok(file),
-                Err(TryLockError::WouldBlock) => {
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => {}
-                        () = tokio::time::sleep(LOCK_POLL_INTERVAL) => {}
-                    }
-                }
-                Err(TryLockError::Error(error)) => {
-                    return Err(Report::new_sendsync(error)
-                        .context(ChromeForTestingError::AcquireCacheLock { path }));
+/// Poll the non-blocking lock acquisition until it succeeds or the token is cancelled.
+async fn wait(
+    path: &Path,
+    cancellation: &CancellationToken,
+    try_lock: fn(&File) -> std::result::Result<(), TryLockError>,
+) -> Result<File> {
+    let file = open(path).await?;
+    loop {
+        crate::check_cancelled(cancellation)?;
+        match try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {}
+                    () = tokio::time::sleep(LOCK_POLL_INTERVAL) => {}
                 }
             }
+            Err(TryLockError::Error(error)) => return Err(acquire_error(error, path)),
         }
     }
+}
+
+async fn open(path: &Path) -> Result<File> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .await
+        .context(ChromeForTestingError::OpenLockFile {
+            path: path.to_owned(),
+        })?;
+    Ok(file.into_std().await)
+}
+
+fn acquire_error(error: std::io::Error, path: &Path) -> Report<ChromeForTestingError> {
+    Report::new_sendsync(error).context(ChromeForTestingError::AcquireCacheLock {
+        path: path.to_owned(),
+    })
 }

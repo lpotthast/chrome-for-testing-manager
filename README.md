@@ -27,13 +27,14 @@ and so that bumping the Chrome version under test is one simple change.
 - **Port and lifecycle managed for you.** Bind to a fixed port for debugging or let the OS pick one for parallel test
   isolation. A process guard attempts termination on drop while its multithreaded Tokio runtime is active; use explicit
   `shutdown().await` when termination and its result must be observed.
-- **Ergonomic `thirtyfour` integration.** Run a browser test inside `session().run(|s| ...)` where the WebDriver
+- **Ergonomic `thirtyfour` integration.** Run a browser test inside `session().run(|s| ...)` where the `WebDriver`
   session is created, scoped, and torn down automatically. Optional `.with_caps(...)`, `.with_config(...)`, and
-  `.with_cancellation(...)` builder steps let you tweak Chrome capabilities, the WebDriver client, or cancellation
+  `.with_cancellation(...)` builder steps let you tweak Chrome capabilities, the `WebDriver` client, or cancellation
   without leaving the chain. `thirtyfour` is the default session provider; disabling it keeps lower-level version,
   cache, download, and process management while removing session APIs.
 - **Observable.** Call `subscribe_output()` for a bounded, non-blocking subscription streaming `chromedriver`
-  stdout/stderr lines into your own logging or fixtures.
+  stdout/stderr lines into your own logging or fixtures, or `recent_output()` for the last lines printed since spawn.
+  Startup failures carry that recent output in their error report.
 
 ## Installation
 
@@ -44,13 +45,13 @@ rootcause = "0.13"
 thirtyfour = "0.37"
 
 # Additional dependencies for the example below.
-assertr = "0.6"
+assertr = "0.7"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ## Example
 
-```rust
+```rust,no_run
 use assertr::prelude::*;
 use chrome_for_testing_manager::ChromeForTesting;
 use rootcause::Report;
@@ -88,7 +89,7 @@ async fn main() -> Result<(), Report> {
                 .await?;
             assert_that!(session.title().await?).is_equal_to("Selenium");
 
-            Ok(())
+            Ok::<(), WebDriverError>(())
         }).await;
     let shutdown_result = chrome.shutdown().await;
 
@@ -101,10 +102,9 @@ async fn main() -> Result<(), Report> {
 Cancellation is opt-in: pass a `CancellationToken` (re-exported from `tokio-util`) through the config's
 `.cancellation(...)` setter or `SessionBuilder::with_cancellation(...)`. Cancelled work rolls back cooperatively
 (process startup is terminated, an in-flight cache transaction removes its staging, a session callback is dropped and
-the session closed) and is reported as `ChromeForTestingError::Cancelled` after cleanup has been drained. The full
-drop-safety guarantee behind cleanup-sensitive operations is documented in the crate-level "Cancellation and drop
-safety" section of the API docs. Use `ChromeForTesting::shutdown().await` when graceful shutdown and its result
-matter.
+the session closed) and is reported as `ChromeForTestingError::Cancelled` after cleanup has been drained. What
+happens when a future is dropped instead is documented in the crate-level "Cancellation and drop safety" section of
+the API docs. Use `ChromeForTesting::shutdown().await` when graceful shutdown and its result matter.
 
 ## Configuration
 
@@ -115,15 +115,15 @@ technical driver settings are grouped in `ChromeDriverConfig`, whose `port` sett
 
 ```rust,no_run
 use chrome_for_testing_manager::{
-    Channel, ChromeDriverConfig, ChromeForTesting, ChromeForTestingConfig, GracefulShutdown,
-    LifecyclePolicy, NetworkPolicy,
+    Channel, ChromeDriverConfig, ChromeForTesting, ChromeForTestingConfig,
+    DriverOutputSubscriptionError, GracefulShutdown, LifecyclePolicy, NetworkPolicy,
 };
 use std::time::Duration;
 
 async fn run() -> Result<(), rootcause::Report<chrome_for_testing_manager::ChromeForTestingError>> {
     let config = ChromeForTestingConfig::builder()
         .version(Channel::Beta)
-        .cache_dir("target/chrome-cache".into())
+        .cache_dir("target/chrome-cache")
         .network(
             NetworkPolicy::builder()
                 .artifact_download_timeout(Duration::from_secs(10 * 60))
@@ -145,8 +145,16 @@ async fn run() -> Result<(), rootcause::Report<chrome_for_testing_manager::Chrom
 
     let mut driver_output = chrome.subscribe_output();
     tokio::spawn(async move {
-        while let Ok(line) = driver_output.recv().await {
-            println!("{line:?}");
+        loop {
+            match driver_output.recv().await {
+                Ok(line) => println!("{line}"),
+                // This subscriber fell behind and missed some lines; it can keep receiving.
+                Err(DriverOutputSubscriptionError::Lagged { skipped }) => {
+                    eprintln!("missed {skipped} chromedriver output lines");
+                }
+                // The driver's output has ended.
+                Err(_) => break,
+            }
         }
     });
 
@@ -176,17 +184,20 @@ instead.
 
 ## Going lower-level
 
-For most users `ChromeForTesting` is the right entry point. Non-`thirtyfour` WebDriver clients can connect through
-`driver_port()` and must register `browser_executable()` as the browser binary in their session capabilities. If you
-need finer control, pre-warming the cache without spawning chromedriver, running multiple chromedriver instances off a
-single download, or pinning a custom cache directory in CI, reach for `ChromeForTestingManager` directly.
+For most users `ChromeForTesting` is the right entry point. Non-`thirtyfour` `WebDriver` clients can connect through
+`driver_port()`. With regular Chrome, they register `browser_executable()` as the browser binary in their session
+capabilities. With Chrome Headless Shell, they launch `browser_executable()` with `--remote-debugging-port` themselves
+and attach through `goog:chromeOptions.debuggerAddress`, as the managed `thirtyfour` sessions do. If you need finer
+control, such as pre-warming the cache without spawning chromedriver or running multiple chromedriver instances off a
+single download, reach for `ChromeForTestingManager` directly.
 It exposes `resolve_version`, `download` / `download_for`, `launch_driver`, and `prepare_caps` as separate steps.
 Resolution takes a non-empty `BrowserArtifactRequest`, so `Latest` is selected only from releases that actually contain
-ChromeDriver and every requested browser artifact. `download` installs exactly that resolved set, while `download_for`
-returns the one `LoadedBrowserPackage` for a specific binary. Each returned `LoadedBrowserPackage` records the selected
+`ChromeDriver` and every requested browser artifact. `download` installs exactly that resolved set, while `download_for`
+installs and returns only the `LoadedBrowserPackage` for one specific binary. Each returned `LoadedBrowserPackage` records the selected
 binary and both paths while privately retaining a cache lease.
-`launch_driver` consumes a `ChromeDriverConfig` and returns `ChromeDriverProcess`, which exposes `port()`, a bounded non-blocking
-`subscribe_output()`, and consuming `terminate()` without exposing the generic process implementation.
+`launch_driver` consumes a `ChromeDriverConfig` and returns `ChromeDriverProcess`, which exposes `port()`, a bounded
+non-blocking `subscribe_output()`, `recent_output()`, and consuming `terminate()` without exposing the generic process
+implementation.
 
 Installations are cross-process coordinated through typed shared-cache and exclusive-artifact lock guards. Each
 artifact is downloaded and validated in a unique same-filesystem staging directory, marked with the executable size,
@@ -201,3 +212,7 @@ owner files.
 - Starting from version `0.7.0`, the minimum supported rust version is `1.85.1`
 - Starting from version `0.5.0`, the minimum supported rust version is `1.85.0`
 - Starting from version `0.1.0`, the minimum supported rust version is `1.81.0`
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

@@ -1,45 +1,47 @@
 //! Builder for scoped, panic-safe `WebDriver` session execution.
 //!
-//! Capability and client configuration are applied before connection. User callbacks always flow
-//! through ordered session and browser cleanup.
+//! Capability and client configuration are applied before connection. Every acquired resource
+//! (a Chrome Headless Shell, the `WebDriver` session) is owned by one cleanup guard from the moment
+//! it exists, so errors, cancellation, panics, and dropped futures all flow through the same
+//! ordered cleanup: quit the session, then terminate the shell.
 
 use super::Session;
 use super::headless_shell::HeadlessShellSession;
 use crate::browser::{ChromeBinary, LoadedBrowserPackage};
-use crate::error::operation_result_with_cleanup;
+use crate::error::{attach_child, operation_result_with_cleanup};
 use crate::manager::ChromeForTestingManager;
-use crate::operation::AbortSafeOperation;
 use crate::{CancellationToken, ChromeForTestingError, Port};
 use rootcause::prelude::ResultExt;
 use rootcause::{IntoReportCollection, Report, markers::SendSync, report};
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use thirtyfour::prelude::WebDriverError;
 use thirtyfour::{ChromeCapabilities, WebDriverBuilder};
 
-type CapsSetup = Box<dyn FnOnce(&mut ChromeCapabilities) -> Result<(), WebDriverError> + Send>;
-type ConfigSetup = Box<dyn FnOnce(WebDriverBuilder) -> WebDriverBuilder + Send>;
+type CapsSetup<'a> =
+    Box<dyn FnOnce(&mut ChromeCapabilities) -> Result<(), WebDriverError> + Send + 'a>;
+type ConfigSetup<'a> = Box<dyn FnOnce(WebDriverBuilder) -> WebDriverBuilder + Send + 'a>;
 
 /// A scoped, chainable builder for opening a `thirtyfour` [`Session`] against a running
 /// [`crate::ChromeForTesting`].
 ///
 /// Obtained via [`crate::ChromeForTesting::session`]. Optional setup steps:
 ///
-/// - [`Self::with_cancellation`] opts into cooperative cancellation of connection, callback, and
-///   cleanup.
-/// - [`Self::with_caps`] mutates the [`ChromeCapabilities`] before the session opens (e.g. unset
-///   headless, add Chrome args).
+/// - [`Self::with_cancellation`] opts into cooperative cancellation of the session run.
+/// - [`Self::with_caps`] mutates the [`ChromeCapabilities`] before the session opens (e.g. add
+///   Chrome args).
 /// - [`Self::with_config`] receives the [`WebDriverBuilder`] and may configure the element poller,
-///   request timeout, user-agent, or keep-alive flag.
+///   user-agent, or HTTP client.
 ///
 /// Call [`Self::run`] to open the session and execute the user closure inside scoped, panic-safe
-/// cleanup that always calls `WebDriver::quit().await`.
+/// cleanup that always quits the session.
 pub struct SessionBuilder<'a> {
     manager: &'a ChromeForTestingManager,
     loaded: &'a LoadedBrowserPackage,
     driver_port: Port,
     cancellation: Option<CancellationToken>,
-    caps_setup: Option<CapsSetup>,
-    config_setup: Option<ConfigSetup>,
+    caps_setups: Vec<CapsSetup<'a>>,
+    config_setups: Vec<ConfigSetup<'a>>,
 }
 
 impl<'a> SessionBuilder<'a> {
@@ -53,14 +55,16 @@ impl<'a> SessionBuilder<'a> {
             loaded,
             driver_port,
             cancellation: None,
-            caps_setup: None,
-            config_setup: None,
+            caps_setups: Vec::new(),
+            config_setups: Vec::new(),
         }
     }
 
     /// Provide a token for cooperative cancellation of this session run.
     ///
-    /// See the [crate-level cancellation section](crate#cancellation-and-drop-safety).
+    /// Cancellation interrupts launching a Chrome Headless Shell and the user closure; a
+    /// `WebDriver` connection in flight is completed and then closed. Cleanup itself is not
+    /// cancellable. See the [crate-level cancellation section](crate#cancellation-and-drop-safety).
     #[must_use]
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = Some(cancellation);
@@ -69,25 +73,35 @@ impl<'a> SessionBuilder<'a> {
 
     /// Provide a closure that mutates the [`ChromeCapabilities`] used to create the session.
     ///
-    /// For Chrome Headless Shell, browser arguments are applied to the separately launched shell.
-    /// Other `goog:chromeOptions` entries are rejected because `ChromeDriver` cannot apply them
-    /// after attaching to that already-running process.
+    /// The capabilities start out headless and pointing at the cached browser binary. Repeated
+    /// calls compose: closures run in the order they were added.
+    ///
+    /// For Chrome Headless Shell, browser arguments are applied to the separately launched shell,
+    /// which is always headless. Other `goog:chromeOptions` entries are rejected because
+    /// `ChromeDriver` cannot apply them after attaching to that already-running process.
     #[must_use]
     pub fn with_caps<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(&mut ChromeCapabilities) -> Result<(), WebDriverError> + Send + 'static,
+        F: FnOnce(&mut ChromeCapabilities) -> Result<(), WebDriverError> + Send + 'a,
     {
-        self.caps_setup = Some(Box::new(f));
+        self.caps_setups.push(Box::new(f));
         self
     }
 
     /// Provide a closure that configures the [`WebDriverBuilder`] before the session is opened.
+    ///
+    /// The builder starts out with an HTTP client that bypasses proxies (the driver listens on
+    /// `127.0.0.1`) and applies the `webdriver_request_timeout` of [`crate::NetworkPolicy`]. Because a
+    /// client is supplied, [`WebDriverBuilder::request_timeout`] has no effect; replace the client
+    /// through [`WebDriverBuilder::client`] for other HTTP settings. Repeated calls compose:
+    /// closures run in the order they were added. The configuration also governs the requests
+    /// that quit the session.
     #[must_use]
     pub fn with_config<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(WebDriverBuilder) -> WebDriverBuilder + Send + 'static,
+        F: FnOnce(WebDriverBuilder) -> WebDriverBuilder + Send + 'a,
     {
-        self.config_setup = Some(Box::new(f));
+        self.config_setups.push(Box::new(f));
         self
     }
 
@@ -97,23 +111,21 @@ impl<'a> SessionBuilder<'a> {
     /// Cleanup runs regardless of outcome. A panic in the user closure is caught, cleanup is
     /// attempted, and the original panic is always resumed.
     ///
-    /// If cancellation is requested while `WebDriver` connection is in flight, connection is driven
-    /// to completion because dropping it could leave an unreachable server-side session. A newly
-    /// connected session is then cleaned up before cancellation is reported. Cancellation during
-    /// the user closure drops its future before cleanup begins. See the
-    /// [crate-level cancellation section](crate#cancellation-and-drop-safety) for the drop-safety
-    /// guarantee behind connection and cleanup.
+    /// If cancellation is requested while the `WebDriver` connection is in flight, the connection
+    /// is completed, because abandoning it could leave an unreachable server-side session, and the
+    /// new session is then closed before cancellation is reported. Cancellation during the user
+    /// closure drops its future before cleanup begins. If this future itself is dropped, cleanup
+    /// is handed to the Tokio runtime and runs in the background.
     ///
-    /// The cleanup deadline bounds how long this method waits, not how long the cleanup owner may
-    /// run. If the deadline elapses, the runtime-owned quit task remains alive to avoid invoking
-    /// `WebDriver`'s blocking synchronous drop fallback.
+    /// Quitting the session waits at most the `session_cleanup_timeout` of [`crate::LifecyclePolicy`]; a
+    /// session that cannot be quit in time is abandoned (`ChromeDriver` ends it when it
+    /// terminates). A Chrome Headless Shell is terminated regardless.
     ///
     /// # Errors
     ///
     /// Returns [`ChromeForTestingError::Cancelled`] if cancellation is requested and cleanup
     /// succeeds. Other errors cover capability setup, session creation, the user closure, or
-    /// cleanup. An operation error remains primary when cleanup also fails. Connection and quit
-    /// honor the request behavior configured through [`Self::with_config`].
+    /// cleanup. An operation error remains primary when cleanup also fails.
     pub async fn run<T, E, F>(self, f: F) -> Result<T, Report<ChromeForTestingError>>
     where
         F: for<'b> AsyncFnOnce(&'b Session) -> Result<T, E>,
@@ -121,42 +133,51 @@ impl<'a> SessionBuilder<'a> {
     {
         use futures::FutureExt;
 
-        let port = self.driver_port;
-        let cancellation = self.cancellation.unwrap_or_default();
+        let Self {
+            manager,
+            loaded,
+            driver_port: port,
+            cancellation,
+            caps_setups,
+            config_setups,
+        } = self;
+        let cancellation = cancellation.unwrap_or_default();
         crate::check_cancelled(&cancellation)?;
 
-        let mut caps = self.manager.prepare_caps(self.loaded)?;
-        if let Some(caps_setup) = self.caps_setup {
-            caps_setup(&mut caps).context(ChromeForTestingError::ConfigureSessionCapabilities)?;
+        let mut caps = manager.prepare_caps(loaded)?;
+        for setup in caps_setups {
+            setup(&mut caps).context(ChromeForTestingError::ConfigureSessionCapabilities)?;
         }
-        let headless_shell = match self.loaded.chrome_binary() {
-            ChromeBinary::Chrome => None,
-            ChromeBinary::ChromeHeadlessShell => Some(
-                self.manager
-                    .launch_headless_shell_session(self.loaded, &mut caps, &cancellation)
-                    .await?,
-            ),
-        };
-        let builder = thirtyfour::WebDriver::builder(format!("http://127.0.0.1:{port}"), caps);
-        let builder = match self.config_setup {
-            Some(config_setup) => config_setup(builder),
-            None => builder,
-        };
-        let cleanup_timeout = self.manager.session_cleanup_timeout();
-        let resources = SessionResources::connect(
-            builder,
-            headless_shell,
-            port,
-            cleanup_timeout,
-            cancellation.clone(),
-        )
-        .await?;
-        let session_guard = SessionCleanupGuard::new(resources);
+        let mut resources = SessionCleanupGuard(Some(SessionResources {
+            session: None,
+            headless_shell: None,
+            cleanup_timeout: manager.lifecycle().session_cleanup_timeout(),
+        }));
+        if loaded.chrome_binary() == ChromeBinary::ChromeHeadlessShell {
+            resources.get_mut().headless_shell = Some(
+                HeadlessShellSession::launch(
+                    loaded,
+                    &mut caps,
+                    manager.local_client(),
+                    manager.lifecycle(),
+                    &cancellation,
+                )
+                .await?,
+            );
+        }
+        // A panic in a config closure unwinds through `resources`, whose drop terminates the shell.
+        let builder = config_setups.into_iter().fold(
+            thirtyfour::WebDriver::builder(format!("http://127.0.0.1:{port}"), caps)
+                .client(manager.webdriver_client().clone()),
+            |builder, setup| setup(builder),
+        );
+        if let Err(error) = connect(builder, port, &cancellation, resources.get_mut()).await {
+            return operation_result_with_cleanup(Err(error), resources.cleanup().await);
+        }
 
         let callback_result = {
-            let mut callback = std::pin::pin!(
-                core::panic::AssertUnwindSafe(f(session_guard.session())).catch_unwind()
-            );
+            let mut callback =
+                std::pin::pin!(AssertUnwindSafe(f(resources.session())).catch_unwind());
             tokio::select! {
                 // Give an already-requested cancellation deterministic precedence over callback
                 // completion so cleanup begins instead of returning a test result.
@@ -166,7 +187,7 @@ impl<'a> SessionBuilder<'a> {
             }
         };
 
-        let cleanup_result = session_guard.cleanup().await;
+        let cleanup_result = resources.cleanup().await;
         match callback_result {
             None => operation_result_with_cleanup(
                 Err(report!(ChromeForTestingError::Cancelled)),
@@ -190,160 +211,81 @@ impl<'a> SessionBuilder<'a> {
     }
 }
 
-impl SessionResources {
-    async fn connect(
-        builder: WebDriverBuilder,
-        headless_shell: Option<HeadlessShellSession>,
-        port: crate::Port,
-        cleanup_timeout: Duration,
-        cancellation: CancellationToken,
-    ) -> Result<Self, Report<ChromeForTestingError>> {
-        AbortSafeOperation::run(
-            "WebDriver connection",
-            cancellation,
-            move |operation_cancellation| async move {
-                if operation_cancellation.is_cancelled() {
-                    return operation_result_with_cleanup(
-                        Err(report!(ChromeForTestingError::Cancelled)),
-                        Self::terminate_headless_shell_bounded(headless_shell, cleanup_timeout)
-                            .await,
-                    );
-                }
-
-                // `POST /session` is not safe to abandon. ChromeDriver can create the remote
-                // session before the HTTP response gives us the session id required by
-                // `DELETE /session/{id}`. The owner therefore drives the handshake to completion
-                // even after its public caller is dropped. The cancelled branch below then either
-                // closes the newly identified session or reports the failed handshake alongside
-                // Headless Shell cleanup. This continuation is useful only while the Tokio runtime
-                // remains alive; it is not protection against application termination.
-                let connection_result = builder
-                    .connect()
-                    .await
-                    .context(ChromeForTestingError::StartWebDriverSession { port });
-                if operation_cancellation.is_cancelled() {
-                    return match connection_result {
-                        Ok(driver) => operation_result_with_cleanup(
-                            Err(report!(ChromeForTestingError::Cancelled)),
-                            Self {
-                                session: Session { driver },
-                                headless_shell,
-                                cleanup_timeout,
-                            }
-                            .cleanup()
-                            .await,
-                        ),
-                        Err(connection_error) => {
-                            let mut cancellation_error = report!(ChromeForTestingError::Cancelled);
-                            cancellation_error
-                                .children_mut()
-                                .push(connection_error.into_dynamic().into_cloneable());
-                            operation_result_with_cleanup(
-                                Err(cancellation_error),
-                                Self::terminate_headless_shell_bounded(
-                                    headless_shell,
-                                    cleanup_timeout,
-                                )
-                                .await,
-                            )
-                        }
-                    };
-                }
-
-                match connection_result {
-                    Ok(driver) => Ok(Self {
-                        session: Session { driver },
-                        headless_shell,
-                        cleanup_timeout,
-                    }),
-                    Err(error) => operation_result_with_cleanup(
-                        Err(error),
-                        Self::terminate_headless_shell_bounded(headless_shell, cleanup_timeout)
-                            .await,
-                    ),
-                }
-            },
-        )
+/// Open the `WebDriver` session and store it in `resources`.
+///
+/// `POST /session` is not interrupted by cancellation: `ChromeDriver` can create the remote
+/// session before the response reveals the session id needed to close it. A session connected
+/// after cancellation is stored nonetheless, so that cleanup closes it.
+async fn connect(
+    builder: WebDriverBuilder,
+    port: Port,
+    cancellation: &CancellationToken,
+    resources: &mut SessionResources,
+) -> Result<(), Report<ChromeForTestingError>> {
+    crate::check_cancelled(cancellation)?;
+    let connection = builder
+        .connect()
         .await
+        .context(ChromeForTestingError::StartWebDriverSession { port });
+    let connection = connection.map(|driver| resources.session = Some(Session { driver }));
+    if !cancellation.is_cancelled() {
+        return connection;
     }
-
-    async fn cleanup(self) -> Result<(), Report<ChromeForTestingError>> {
-        let timeout = self.cleanup_timeout;
-        bounded_cleanup(
-            "browser-session cleanup",
-            timeout,
-            self.cleanup_to_completion(),
-        )
-        .await
+    let mut cancelled = report!(ChromeForTestingError::Cancelled);
+    if let Err(connection_error) = connection {
+        attach_child(&mut cancelled, connection_error);
     }
-
-    async fn cleanup_to_completion(self) -> Result<(), Report<ChromeForTestingError>> {
-        let quit_result = self.session.quit().await;
-        let browser_result = Self::terminate_headless_shell(self.headless_shell).await;
-        operation_result_with_cleanup(quit_result, browser_result)
-    }
-
-    async fn terminate_headless_shell_bounded(
-        headless_shell: Option<HeadlessShellSession>,
-        timeout: Duration,
-    ) -> Result<(), Report<ChromeForTestingError>> {
-        bounded_cleanup(
-            "Headless Shell cleanup",
-            timeout,
-            Self::terminate_headless_shell(headless_shell),
-        )
-        .await
-    }
-
-    async fn terminate_headless_shell(
-        headless_shell: Option<HeadlessShellSession>,
-    ) -> Result<(), Report<ChromeForTestingError>> {
-        if let Some(headless_shell) = headless_shell {
-            headless_shell.terminate().await?;
-        }
-        Ok(())
-    }
+    Err(cancelled)
 }
 
-/// Bound how long the caller waits for a runtime-owned cleanup future, reporting an elapsed wait
-/// as [`ChromeForTestingError::SessionCleanupTimeout`]. The detached cleanup runs to completion.
-async fn bounded_cleanup<T: Send + 'static>(
-    operation: &'static str,
-    timeout: Duration,
-    cleanup: impl Future<Output = Result<T, Report<ChromeForTestingError>>> + Send + 'static,
-) -> Result<T, Report<ChromeForTestingError>> {
-    AbortSafeOperation::run_bounded(operation, timeout, cleanup)
-        .await
-        .map_err(|_| report!(ChromeForTestingError::SessionCleanupTimeout { timeout }))?
-}
-
+/// The resources acquired for one session run.
 struct SessionResources {
-    session: Session,
+    session: Option<Session>,
     headless_shell: Option<HeadlessShellSession>,
     cleanup_timeout: Duration,
 }
 
-struct SessionCleanupGuard {
-    resources: Option<SessionResources>,
+impl SessionResources {
+    /// Quit the session within the cleanup timeout, then terminate the Headless Shell.
+    async fn cleanup(self) -> Result<(), Report<ChromeForTestingError>> {
+        let Self {
+            session,
+            headless_shell,
+            cleanup_timeout,
+        } = self;
+        let quit_result = match session {
+            Some(session) => session.quit_within(cleanup_timeout).await,
+            None => Ok(()),
+        };
+        let shell_result = match headless_shell {
+            Some(headless_shell) => headless_shell.terminate().await.map(drop),
+            None => Ok(()),
+        };
+        operation_result_with_cleanup(quit_result, shell_result)
+    }
 }
 
+/// Owns [`SessionResources`] until [`Self::cleanup`]. If dropped before (the run future was
+/// dropped, or a setup closure panicked), it hands the cleanup to the Tokio runtime.
+struct SessionCleanupGuard(Option<SessionResources>);
+
 impl SessionCleanupGuard {
-    const fn new(resources: SessionResources) -> Self {
-        Self {
-            resources: Some(resources),
-        }
+    fn get_mut(&mut self) -> &mut SessionResources {
+        self.0
+            .as_mut()
+            .expect("session guard owns resources until cleanup")
     }
 
+    /// The connected session.
     fn session(&self) -> &Session {
-        &self
-            .resources
+        self.0
             .as_ref()
-            .expect("session guard owns resources until cleanup")
-            .session
+            .and_then(|resources| resources.session.as_ref())
+            .expect("session guard owns a connected session")
     }
 
     async fn cleanup(mut self) -> Result<(), Report<ChromeForTestingError>> {
-        self.resources
+        self.0
             .take()
             .expect("session guard owns resources until cleanup")
             .cleanup()
@@ -353,14 +295,16 @@ impl SessionCleanupGuard {
 
 impl Drop for SessionCleanupGuard {
     fn drop(&mut self) {
-        let Some(resources) = self.resources.take() else {
+        let Some(resources) = self.0.take() else {
             return;
         };
+        if resources.session.is_none() && resources.headless_shell.is_none() {
+            return;
+        }
 
         // Drop cannot await `WebDriver::quit`, so transfer the acquired resources to the active
-        // runtime. As with `AbortSafeOperation`, dropping this JoinHandle detaches cleanup rather
-        // than aborting it. This is best-effort in-process cleanup only: without a live runtime it
-        // cannot run, and after detaching there is no caller to receive a cleanup error.
+        // runtime. Without a live runtime cleanup cannot run, and after detaching there is no
+        // caller to receive a cleanup error.
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -375,7 +319,6 @@ impl Drop for SessionCleanupGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::CacheDir;
     use crate::facade::ChromeForTesting;
     use crate::test_support::{FixtureServer, ResponseSpec, TestDirectory};
     use crate::version::SelectedVersion;
@@ -389,11 +332,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cleanup_timeout_detaches_quit_without_dropping_it() -> Result<(), rootcause::Report> {
+    async fn unanswered_quit_is_abandoned_at_the_cleanup_deadline() -> Result<(), rootcause::Report>
+    {
         let new_session =
             br#"{"value":{"sessionId":"fixture-session","capabilities":{}}}"#.to_vec();
         let delete_response = Bytes::from_static(br#"{"value":null}"#);
-        let delete_delay = Duration::from_millis(200);
+        let delete_delay = Duration::from_secs(10);
         let server = FixtureServer::start(HashMap::from([
             ("/session".to_owned(), ResponseSpec::body(new_session)),
             (
@@ -414,31 +358,32 @@ mod tests {
             thirtyfour::WebDriver::builder(server.url(""), thirtyfour::ChromeCapabilities::new())
                 .connect()
                 .await?;
-        let cleanup_timeout = Duration::from_millis(20);
         let started = Instant::now();
 
         let error = SessionResources {
-            session: Session { driver },
+            session: Some(Session { driver }),
             headless_shell: None,
-            cleanup_timeout,
+            cleanup_timeout: Duration::from_millis(100),
         }
         .cleanup()
         .await
-        .expect_err("cleanup should stop waiting at its independent deadline");
+        .expect_err("an unanswered quit must fail cleanup at its deadline");
 
         assert_that!(matches!(
             error.current_context(),
-            ChromeForTestingError::SessionCleanupTimeout { .. }
+            ChromeForTestingError::QuitSession
         ))
         .is_true();
-        assert_that!(started.elapsed() < Duration::from_millis(150))
-            .with_detail_message("cleanup timeout was blocked by synchronous WebDriver drop")
+        assert_that!(started.elapsed() < delete_delay / 2)
+            .with_detail_message("cleanup must not wait for the unanswered quit")
             .is_true();
-        tokio::time::sleep(delete_delay + Duration::from_millis(50)).await;
+        // An abandoned handle is leaked, so `thirtyfour` does not retry the quit synchronously
+        // when it is dropped.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert_that!(
             server.hits("/session/fixture-session") + server.hits("/session/fixture-session/")
         )
-        .with_detail_message("the detached quit request must continue exactly once")
+        .with_detail_message("the quit request must be sent exactly once")
         .is_equal_to(1);
         Ok(())
     }
@@ -447,8 +392,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_during_webdriver_connection_closes_new_session()
     -> Result<(), rootcause::Report> {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = TestDirectory::new("webdriver-connect-cancellation")?;
         let new_session =
             br#"{"value":{"sessionId":"fixture-session","capabilities":{}}}"#.to_vec();
@@ -481,26 +424,21 @@ mod tests {
                 .build(),
         )?;
         let executable = directory.path().join("fake-chrome.sh");
-        tokio::fs::write(
+        crate::test_support::write_executable(
             &executable,
-            format!(
+            &format!(
                 concat!(
                     "#!/bin/sh\n",
-                    "echo \"ChromeDriver was started successfully on port {}.\"\n",
                     "trap 'exit 0' TERM INT\n",
-                    "while :; do :; done\n",
+                    "echo \"ChromeDriver was started successfully on port {}.\"\n",
+                    "while :; do sleep 1 & wait $!; done\n",
                 ),
                 server.port()
             ),
         )
         .await?;
-        let mut permissions = tokio::fs::metadata(&executable).await?.permissions();
-        permissions.set_mode(0o755);
-        tokio::fs::set_permissions(&executable, permissions).await?;
 
-        let cache_lease = CacheDir::create_at(manager.cache_dir().to_owned())?
-            .acquire_shared(CancellationToken::new())
-            .await?;
+        let cache_lease = crate::test_support::cache_lease(manager.cache_dir()).await?;
         let loaded = LoadedBrowserPackage::new(
             ChromeBinary::Chrome,
             directory.path().join("browser"),
@@ -543,6 +481,46 @@ mod tests {
         )
         .is_equal_to(1);
         chrome.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_setup_steps_compose_in_order() -> Result<(), rootcause::Report> {
+        use thirtyfour::{BrowserCapabilitiesHelper, ChromiumLikeCapabilities};
+
+        let directory = TestDirectory::new("session-builder-composition")?;
+        let manager = ChromeForTestingManager::new_with_config(
+            ChromeForTestingManagerConfig::builder()
+                .cache_dir(directory.path().join("cache"))
+                .build(),
+        )?;
+        let cache_lease = crate::test_support::cache_lease(manager.cache_dir()).await?;
+        let loaded = LoadedBrowserPackage::new(
+            ChromeBinary::Chrome,
+            directory.path().join("browser"),
+            directory.path().join("driver"),
+            cache_lease,
+        );
+        // Borrowed (non-`'static`) state, as a caller's configuration typically is.
+        let args = ["--first".to_owned(), "--second".to_owned()];
+        let user_agents = ["first-agent", "second-agent"];
+
+        let builder = SessionBuilder::new(&manager, &loaded, Port::new(1))
+            .with_caps(|caps| caps.add_arg(&args[0]))
+            .with_caps(|caps| caps.add_arg(&args[1]))
+            .with_config(|builder| builder.user_agent(user_agents[0]))
+            .with_config(|builder| builder.user_agent(user_agents[1]));
+
+        let mut caps = ChromeCapabilities::new();
+        for setup in builder.caps_setups {
+            setup(&mut caps)?;
+        }
+        assert_that!(caps.args()).is_equal_to(args.to_vec());
+        let configured = builder.config_setups.into_iter().fold(
+            thirtyfour::WebDriver::builder("http://127.0.0.1:1", ChromeCapabilities::new()),
+            |builder, setup| setup(builder),
+        );
+        assert_that!(format!("{configured:?}")).contains("second-agent");
         Ok(())
     }
 

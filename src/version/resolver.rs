@@ -3,27 +3,10 @@
 //! Candidate versions are filtered by platform and requested browser artifacts before selection,
 //! preventing later installation from requesting unavailable packages.
 
-use crate::version::{SelectedVersion, VersionRequest};
-use crate::{
-    BrowserArtifactRequest, CancellationToken, ChromeBinary, ChromeForTestingError, Result,
-};
+use crate::version::{ReleaseDownloads, SelectedVersion, VersionRequest};
+use crate::{BrowserArtifactRequest, CancellationToken, ChromeForTestingError, Result};
 use ::chrome_for_testing::{KnownGoodVersions, LastKnownGoodVersions, Platform};
-use rootcause::{option_ext::OptionExt, report};
-
-/// The known-good and per-channel manifests use two structurally identical but distinct
-/// `Downloads` types; this expands the same artifact-availability check for either.
-macro_rules! downloads_support {
-    ($downloads:expr, $platform:expr, $request:expr) => {
-        VersionResolver::supports_artifacts(
-            $request,
-            $downloads.chromedriver_for_platform($platform).is_some(),
-            $downloads.chrome_for_platform($platform).is_some(),
-            $downloads
-                .chrome_headless_shell_for_platform($platform)
-                .is_some(),
-        )
-    };
-}
+use rootcause::{option_ext::OptionExt, prelude::ResultExt};
 
 #[derive(Debug, Clone)]
 pub(crate) struct VersionResolver {
@@ -50,65 +33,60 @@ impl VersionResolver {
         cancellation: CancellationToken,
     ) -> Result<SelectedVersion> {
         crate::check_cancelled(&cancellation)?;
+        let request_error = || ChromeForTestingError::RequestVersions {
+            version_request: version_request.clone(),
+        };
+        let platform = self.platform;
 
         let selected = match &version_request {
-            VersionRequest::Latest => {
-                let all =
-                    crate::await_or_cancelled(&cancellation, self.fetch_known_good_versions())
-                        .await?
-                        .map_err(|error| Self::request_versions_error(error, &version_request))?;
-                all.versions
-                    .into_iter()
-                    .filter(|version| {
-                        downloads_support!(version.downloads, self.platform, requested_artifacts)
-                    })
-                    .max_by_key(|version| version.version)
-                    .map(|version| {
-                        SelectedVersion::from_version(&version, self.platform, requested_artifacts)
-                    })
-            }
             VersionRequest::LatestIn(channel) => {
-                let all =
+                let manifest =
                     crate::await_or_cancelled(&cancellation, self.fetch_last_known_good_versions())
                         .await?
-                        .map_err(|error| Self::request_versions_error(error, &version_request))?;
-                all.channel(channel)
-                    .filter(|version| {
-                        downloads_support!(version.downloads, self.platform, requested_artifacts)
-                    })
-                    .cloned()
-                    .map(|version| {
-                        SelectedVersion::from_channel_version(
-                            version,
-                            self.platform,
+                        .context_with(request_error)?;
+                manifest.channel(channel).and_then(|release| {
+                    let downloads = ReleaseDownloads::of_channel(release, platform);
+                    downloads.supports(requested_artifacts).then(|| {
+                        SelectedVersion::new(
+                            Some(release.channel.clone()),
+                            release.version,
+                            platform,
                             requested_artifacts,
+                            &downloads,
                         )
                     })
+                })
             }
-            VersionRequest::Fixed(requested_version) => {
-                let all =
+            VersionRequest::Latest | VersionRequest::Fixed(_) => {
+                let manifest =
                     crate::await_or_cancelled(&cancellation, self.fetch_known_good_versions())
                         .await?
-                        .map_err(|error| Self::request_versions_error(error, &version_request))?;
-                all.versions
-                    .into_iter()
-                    .find(|version| {
-                        version.version == *requested_version
-                            && downloads_support!(
-                                version.downloads,
-                                self.platform,
-                                requested_artifacts
-                            )
+                        .context_with(request_error)?;
+                manifest
+                    .versions
+                    .iter()
+                    .filter(|release| match &version_request {
+                        VersionRequest::Fixed(version) => release.version == *version,
+                        _ => true,
                     })
-                    .map(|version| {
-                        SelectedVersion::from_version(&version, self.platform, requested_artifacts)
+                    .map(|release| (release, ReleaseDownloads::of_known_good(release, platform)))
+                    .filter(|(_, downloads)| downloads.supports(requested_artifacts))
+                    .max_by_key(|(release, _)| release.version)
+                    .map(|(release, downloads)| {
+                        SelectedVersion::new(
+                            None,
+                            release.version,
+                            platform,
+                            requested_artifacts,
+                            &downloads,
+                        )
                     })
             }
         };
 
-        crate::check_cancelled(&cancellation)?;
         selected.context(ChromeForTestingError::NoMatchingVersion {
             version_request,
+            platform,
             requested_artifacts,
         })
     }
@@ -134,27 +112,5 @@ impl VersionResolver {
     #[cfg(test)]
     pub(crate) fn set_manifest_base_url(&mut self, base_url: reqwest::Url) {
         self.manifest_base_url = Some(base_url);
-    }
-
-    /// Whether a release providing the given artifacts satisfies `request`.
-    const fn supports_artifacts(
-        request: BrowserArtifactRequest,
-        has_chromedriver: bool,
-        has_chrome: bool,
-        has_chrome_headless_shell: bool,
-    ) -> bool {
-        has_chromedriver
-            && (!request.contains(ChromeBinary::Chrome) || has_chrome)
-            && (!request.contains(ChromeBinary::ChromeHeadlessShell) || has_chrome_headless_shell)
-    }
-
-    fn request_versions_error(
-        error: impl std::fmt::Display,
-        version_request: &VersionRequest,
-    ) -> rootcause::Report<ChromeForTestingError> {
-        report!(ChromeForTestingError::RequestVersions {
-            version_request: version_request.clone(),
-        })
-        .attach(format!("chrome-for-testing error:\n{error}"))
     }
 }

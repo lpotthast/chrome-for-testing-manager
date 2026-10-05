@@ -9,12 +9,13 @@ use typed_builder::TypedBuilder;
 
 /// HTTP connection and request deadlines used by networked services.
 ///
-/// The `_timeout` suffix is kept on every field so the generated builder setters match the
-/// getters.
+/// The `_timeout` suffix is kept on every field so that the generated builder setters say what
+/// they configure.
 #[expect(clippy::struct_field_names)]
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct NetworkPolicy {
-    /// TCP connection deadline shared by manifest, artifact, readiness, and `DevTools` clients.
+    /// TCP connection deadline shared by all HTTP clients (manifest, artifact, readiness, `DevTools`,
+    /// and `WebDriver`).
     #[builder(default = Duration::from_secs(30))]
     connect_timeout: Duration,
 
@@ -25,6 +26,14 @@ pub struct NetworkPolicy {
     /// Overall deadline for one artifact request, including its response body.
     #[builder(default = Duration::from_secs(15 * 60))]
     artifact_download_timeout: Duration,
+
+    /// Overall deadline for one `WebDriver` request of a managed session.
+    #[cfg_attr(
+        not(feature = "thirtyfour"),
+        expect(dead_code, reason = "session-only setting")
+    )]
+    #[builder(default = Duration::from_secs(120))]
+    webdriver_request_timeout: Duration,
 }
 
 impl Default for NetworkPolicy {
@@ -35,25 +44,31 @@ impl Default for NetworkPolicy {
 
 impl NetworkPolicy {
     /// Return the TCP connection deadline.
-    #[must_use]
-    pub const fn connect_timeout(&self) -> Duration {
+    pub(crate) const fn connect_timeout(&self) -> Duration {
         self.connect_timeout
     }
 
     /// Return the release-manifest request deadline.
-    #[must_use]
-    pub const fn manifest_timeout(&self) -> Duration {
+    pub(crate) const fn manifest_timeout(&self) -> Duration {
         self.manifest_timeout
     }
 
     /// Return the per-artifact download deadline.
-    #[must_use]
-    pub const fn artifact_download_timeout(&self) -> Duration {
+    pub(crate) const fn artifact_download_timeout(&self) -> Duration {
         self.artifact_download_timeout
+    }
+
+    /// Return the per-request deadline of managed `WebDriver` sessions.
+    #[cfg_attr(
+        not(feature = "thirtyfour"),
+        expect(dead_code, reason = "session-only setting")
+    )]
+    pub(crate) const fn webdriver_request_timeout(&self) -> Duration {
+        self.webdriver_request_timeout
     }
 }
 
-/// Process startup, graceful shutdown, readiness, output, and cleanup policy.
+/// Process startup, readiness, graceful shutdown, and session cleanup policy.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct LifecyclePolicy {
     /// Per-platform graceful-shutdown policy for managed child processes.
@@ -64,11 +79,19 @@ pub struct LifecyclePolicy {
     #[builder(default = Duration::from_secs(10))]
     driver_startup_timeout: Duration,
 
-    /// Maximum time for Chrome Headless Shell to expose `DevTools`.
+    /// Maximum time for Chrome Headless Shell to expose `DevTools` and open its initial page.
+    #[cfg_attr(
+        not(feature = "thirtyfour"),
+        expect(dead_code, reason = "session-only setting")
+    )]
     #[builder(default = Duration::from_secs(10))]
-    browser_startup_timeout: Duration,
+    headless_shell_startup_timeout: Duration,
 
     /// Independent upper bound for `WebDriver` and browser cleanup.
+    #[cfg_attr(
+        not(feature = "thirtyfour"),
+        expect(dead_code, reason = "session-only setting")
+    )]
     #[builder(default = Duration::from_secs(30))]
     session_cleanup_timeout: Duration,
 }
@@ -81,26 +104,30 @@ impl Default for LifecyclePolicy {
 
 impl LifecyclePolicy {
     /// Return the graceful-shutdown policy for managed child processes.
-    #[must_use]
-    pub const fn graceful_shutdown(&self) -> &GracefulShutdown {
+    pub(crate) const fn graceful_shutdown(&self) -> &GracefulShutdown {
         &self.graceful_shutdown
     }
 
     /// Return the `ChromeDriver` startup deadline.
-    #[must_use]
-    pub const fn driver_startup_timeout(&self) -> Duration {
+    pub(crate) const fn driver_startup_timeout(&self) -> Duration {
         self.driver_startup_timeout
     }
 
     /// Return the Chrome Headless Shell startup deadline.
-    #[must_use]
-    pub const fn browser_startup_timeout(&self) -> Duration {
-        self.browser_startup_timeout
+    #[cfg_attr(
+        not(feature = "thirtyfour"),
+        expect(dead_code, reason = "session-only setting")
+    )]
+    pub(crate) const fn headless_shell_startup_timeout(&self) -> Duration {
+        self.headless_shell_startup_timeout
     }
 
     /// Return the independent session-cleanup deadline.
-    #[must_use]
-    pub const fn session_cleanup_timeout(&self) -> Duration {
+    #[cfg_attr(
+        not(feature = "thirtyfour"),
+        expect(dead_code, reason = "session-only setting")
+    )]
+    pub(crate) const fn session_cleanup_timeout(&self) -> Duration {
         self.session_cleanup_timeout
     }
 

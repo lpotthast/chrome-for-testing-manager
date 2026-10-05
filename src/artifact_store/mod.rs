@@ -7,16 +7,16 @@ mod download;
 mod extract;
 mod installation;
 
+use self::installation::ArtifactRequest;
 #[cfg(test)]
-pub(super) use self::installation::completion_marker_name;
-use self::installation::{ArtifactInstaller, ArtifactRequest};
-use crate::browser::{ChromeBinary, LoadedBrowserPackage};
-use crate::cache::{CacheDir, CacheLease, CachePruneResult};
+pub(crate) use self::installation::COMPLETION_MARKER;
+use crate::browser::{BrowserArtifactRequest, ChromeBinary, LoadedBrowserPackage};
+use crate::cache::CacheDir;
+use crate::error::attach_child;
 use crate::version::SelectedVersion;
 use crate::{CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, Result};
-use ::chrome_for_testing::{Download, Platform, Version};
+use ::chrome_for_testing::Platform;
 use rootcause::{Report, option_ext::OptionExt, report};
-use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -46,104 +46,17 @@ impl ArtifactStore {
         &self.cache_dir
     }
 
-    pub(crate) async fn clear(&self) -> Result<()> {
-        self.cache_dir.clear().await
-    }
-
-    pub(crate) async fn prune(&self, retained_versions: &[Version]) -> Result<CachePruneResult> {
-        self.cache_dir.prune(retained_versions).await
-    }
-
-    pub(crate) async fn download(
+    /// Install the `requested` browser packages of `selected`, plus the matching `ChromeDriver`,
+    /// and return one package per requested browser (Chrome before Chrome Headless Shell).
+    ///
+    /// The artifacts install concurrently under one shared cache lease. A failing installation
+    /// cancels the others, and every installation is drained before this returns.
+    pub(crate) async fn install(
         &self,
         selected: &SelectedVersion,
+        requested: BrowserArtifactRequest,
         cancellation: CancellationToken,
     ) -> Result<Vec<LoadedBrowserPackage>> {
-        let artifacts = self
-            .download_requested_artifacts(selected, cancellation)
-            .await?;
-        selected
-            .requested_artifacts()
-            .binaries()
-            .map(|binary| artifacts.package_for(binary, selected.version(), self.platform))
-            .collect()
-    }
-
-    pub(crate) async fn download_for(
-        &self,
-        selected: &SelectedVersion,
-        chrome_binary: ChromeBinary,
-        cancellation: CancellationToken,
-    ) -> Result<LoadedBrowserPackage> {
-        if !selected.requested_artifacts().contains(chrome_binary) {
-            return Err(report!(ChromeForTestingError::BrowserArtifactNotResolved {
-                chrome_binary,
-                version: selected.version(),
-                platform: selected.platform(),
-            }));
-        }
-        self.download_requested_artifacts(selected, cancellation)
-            .await?
-            .package_for(chrome_binary, selected.version(), self.platform)
-    }
-
-    async fn download_requested_artifacts(
-        &self,
-        selected: &SelectedVersion,
-        cancellation: CancellationToken,
-    ) -> Result<DownloadedBrowserArtifacts> {
-        let downloads = self.downloads_for(selected)?;
-        let cache_lease = self.cache_dir.acquire_shared(cancellation.clone()).await?;
-        let transaction_cancellation = cancellation.child_token();
-        let installer = ArtifactInstaller {
-            cache_dir: &self.cache_dir,
-            client: &self.client,
-            platform: self.platform,
-            artifact_timeout: self.artifact_timeout,
-        };
-        let driver_request = ArtifactRequest {
-            artifact: ChromeForTestingArtifact::ChromeDriver,
-            url: &downloads.chromedriver.url,
-            executable: self.platform.chromedriver_executable_path(),
-        };
-        let chrome_request = downloads.chrome.map(|download| ArtifactRequest {
-            artifact: ChromeForTestingArtifact::Chrome,
-            url: &download.url,
-            executable: self.platform.chrome_executable_path(),
-        });
-        let headless_request = downloads
-            .chrome_headless_shell
-            .map(|download| ArtifactRequest {
-                artifact: ChromeForTestingArtifact::ChromeHeadlessShell,
-                url: &download.url,
-                executable: self.platform.chrome_headless_shell_executable_path(),
-            });
-
-        let driver = installer.install_and_cancel_siblings(
-            selected.version(),
-            driver_request,
-            transaction_cancellation.clone(),
-        );
-        let chrome = installer.install_optional_and_cancel_siblings(
-            selected.version(),
-            chrome_request,
-            transaction_cancellation.clone(),
-        );
-        let headless = installer.install_optional_and_cancel_siblings(
-            selected.version(),
-            headless_request,
-            transaction_cancellation,
-        );
-        let (driver, chrome, chrome_headless_shell) = tokio::join!(driver, chrome, headless);
-        ArtifactInstallResults {
-            chromedriver: driver,
-            chrome,
-            chrome_headless_shell,
-        }
-        .finish(cache_lease, cancellation.is_cancelled())
-    }
-
-    fn downloads_for<'a>(&self, selected: &'a SelectedVersion) -> Result<ResolvedDownloads<'a>> {
         if selected.platform() != self.platform {
             return Err(report!(
                 ChromeForTestingError::SelectedVersionPlatformMismatch {
@@ -152,187 +65,153 @@ impl ArtifactStore {
                 }
             ));
         }
-
-        let requested = selected.requested_artifacts();
-        let chromedriver =
-            selected
-                .chromedriver
-                .as_ref()
-                .context(ChromeForTestingError::NoArtifactDownload {
-                    artifact: ChromeForTestingArtifact::ChromeDriver,
-                    version: selected.version(),
-                    platform: self.platform,
-                })?;
-        let chrome =
-            if requested.contains(ChromeBinary::Chrome) {
-                Some(selected.chrome.as_ref().context(
-                    ChromeForTestingError::NoArtifactDownload {
-                        artifact: ChromeForTestingArtifact::Chrome,
-                        version: selected.version(),
-                        platform: self.platform,
-                    },
-                )?)
-            } else {
-                None
-            };
-        let chrome_headless_shell = if requested.contains(ChromeBinary::ChromeHeadlessShell) {
-            Some(selected.chrome_headless_shell.as_ref().context(
-                ChromeForTestingError::NoArtifactDownload {
-                    artifact: ChromeForTestingArtifact::ChromeHeadlessShell,
-                    version: selected.version(),
-                    platform: self.platform,
-                },
-            )?)
-        } else {
-            None
+        let driver_request =
+            self.artifact_request(selected, ChromeForTestingArtifact::ChromeDriver)?;
+        let browser_request = |binary: ChromeBinary| {
+            requested
+                .contains(binary)
+                .then(|| self.artifact_request(selected, binary.artifact()))
+                .transpose()
         };
+        let chrome_request = browser_request(ChromeBinary::Chrome)?;
+        let headless_request = browser_request(ChromeBinary::ChromeHeadlessShell)?;
 
-        Ok(ResolvedDownloads {
-            chromedriver,
-            chrome,
-            chrome_headless_shell,
+        let cache_lease = self.cache_dir.acquire_shared(&cancellation).await?;
+        // A failing installation cancels its siblings through this token, not the caller's.
+        let siblings = cancellation.child_token();
+        let version = selected.version();
+        let (driver, chrome, headless) = tokio::join!(
+            self.install_artifact_or_cancel(version, Some(driver_request), &siblings),
+            self.install_artifact_or_cancel(version, chrome_request, &siblings),
+            self.install_artifact_or_cancel(version, headless_request, &siblings),
+        );
+        let (driver, chrome, headless) = match (driver, chrome, headless) {
+            (Ok(Some(driver)), Ok(chrome), Ok(headless)) if !cancellation.is_cancelled() => {
+                (driver, chrome, headless)
+            }
+            (driver, chrome, headless) => {
+                let errors = [driver.err(), chrome.err(), headless.err()];
+                return Err(combine_install_errors(
+                    errors.into_iter().flatten().collect(),
+                    cancellation.is_cancelled(),
+                ));
+            }
+        };
+        Ok([
+            (ChromeBinary::Chrome, chrome),
+            (ChromeBinary::ChromeHeadlessShell, headless),
+        ]
+        .into_iter()
+        .filter_map(|(binary, browser)| {
+            Some(LoadedBrowserPackage::new(
+                binary,
+                browser?,
+                driver.clone(),
+                cache_lease.clone(),
+            ))
+        })
+        .collect())
+    }
+
+    /// The download and executable of `artifact` in `selected`.
+    ///
+    /// The resolver only selects versions providing every requested download; the error guards
+    /// that invariant.
+    fn artifact_request<'a>(
+        &self,
+        selected: &'a SelectedVersion,
+        artifact: ChromeForTestingArtifact,
+    ) -> Result<ArtifactRequest<'a>> {
+        let (download, executable) = match artifact {
+            ChromeForTestingArtifact::Chrome => {
+                (&selected.chrome, self.platform.chrome_executable_path())
+            }
+            ChromeForTestingArtifact::ChromeHeadlessShell => (
+                &selected.chrome_headless_shell,
+                self.platform.chrome_headless_shell_executable_path(),
+            ),
+            ChromeForTestingArtifact::ChromeDriver => (
+                &selected.chromedriver,
+                self.platform.chromedriver_executable_path(),
+            ),
+        };
+        let download = download
+            .as_ref()
+            .context(ChromeForTestingError::NoArtifactDownload {
+                artifact,
+                version: selected.version(),
+                platform: self.platform,
+            })?;
+        Ok(ArtifactRequest {
+            artifact,
+            url: &download.url,
+            executable,
         })
     }
 }
 
-struct ResolvedDownloads<'a> {
-    chromedriver: &'a Download,
-    chrome: Option<&'a Download>,
-    chrome_headless_shell: Option<&'a Download>,
-}
-
-pub(super) struct ArtifactInstallResults {
-    chromedriver: Result<PathBuf>,
-    chrome: Result<Option<PathBuf>>,
-    chrome_headless_shell: Result<Option<PathBuf>>,
-}
-
-impl ArtifactInstallResults {
-    fn finish(
-        self,
-        cache_lease: CacheLease,
-        caller_cancelled: bool,
-    ) -> Result<DownloadedBrowserArtifacts> {
-        if caller_cancelled {
-            let mut cancellation_error = report!(ChromeForTestingError::Cancelled);
-            Self::attach_secondary_errors(&mut cancellation_error, self.into_errors());
-            return Err(cancellation_error);
-        }
-
-        match (self.chromedriver, self.chrome, self.chrome_headless_shell) {
-            (Ok(chromedriver), Ok(chrome), Ok(chrome_headless_shell)) => {
-                Ok(DownloadedBrowserArtifacts {
-                    chromedriver,
-                    chrome,
-                    chrome_headless_shell,
-                    cache_lease,
-                })
-            }
-            (chromedriver, chrome, chrome_headless_shell) => Err(Self::combine_errors(
-                chromedriver
-                    .err()
-                    .into_iter()
-                    .chain(chrome.err())
-                    .chain(chrome_headless_shell.err()),
-            )),
-        }
+/// Combine the errors of a failed installation transaction.
+///
+/// Installations cancelled because of a sibling failure or caller cancellation only echo that
+/// cause, so their `Cancelled` errors are dropped. Caller cancellation is primary; otherwise the
+/// first real failure is.
+fn combine_install_errors(
+    mut errors: Vec<Report<ChromeForTestingError>>,
+    caller_cancelled: bool,
+) -> Report<ChromeForTestingError> {
+    let is_cancelled = |error: &Report<ChromeForTestingError>| {
+        matches!(error.current_context(), ChromeForTestingError::Cancelled)
+    };
+    let mut primary = match errors.iter().position(|error| !is_cancelled(error)) {
+        Some(index) if !caller_cancelled => errors.remove(index),
+        _ => report!(ChromeForTestingError::Cancelled),
+    };
+    for error in errors.into_iter().filter(|error| !is_cancelled(error)) {
+        attach_child(&mut primary, error);
     }
-
-    fn into_errors(self) -> impl Iterator<Item = Report<ChromeForTestingError>> {
-        self.chromedriver
-            .err()
-            .into_iter()
-            .chain(self.chrome.err())
-            .chain(self.chrome_headless_shell.err())
-    }
-
-    fn combine_errors(
-        errors: impl IntoIterator<Item = Report<ChromeForTestingError>>,
-    ) -> Report<ChromeForTestingError> {
-        let mut errors = errors.into_iter().collect::<Vec<_>>();
-        let primary_index = errors
-            .iter()
-            .position(|error| !matches!(error.current_context(), ChromeForTestingError::Cancelled))
-            .or((!errors.is_empty()).then_some(0))
-            .expect("caller only combines failed transactions");
-        let mut primary = errors.remove(primary_index);
-        Self::attach_secondary_errors(&mut primary, errors);
-        primary
-    }
-
-    fn attach_secondary_errors(
-        primary: &mut Report<ChromeForTestingError>,
-        errors: impl IntoIterator<Item = Report<ChromeForTestingError>>,
-    ) {
-        for secondary in errors {
-            primary
-                .children_mut()
-                .push(secondary.into_dynamic().into_cloneable());
-        }
-    }
+    primary
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ArtifactInstallResults;
+    use super::combine_install_errors;
     use crate::ChromeForTestingError;
     use assertr::prelude::*;
     use rootcause::report;
 
     #[test]
     fn transaction_error_prefers_real_failure_over_derivative_cancellation() {
-        let error = ArtifactInstallResults::combine_errors([
-            report!(ChromeForTestingError::Cancelled),
-            report!(ChromeForTestingError::UnsupportedPlatform),
-        ]);
+        let error = combine_install_errors(
+            vec![
+                report!(ChromeForTestingError::Cancelled),
+                report!(ChromeForTestingError::DetermineCacheDir),
+            ],
+            false,
+        );
 
         assert_that!(matches!(
             error.current_context(),
-            ChromeForTestingError::UnsupportedPlatform
+            ChromeForTestingError::DetermineCacheDir
+        ))
+        .is_true();
+        assert_that!(error.children().into_iter().count()).is_equal_to(0);
+    }
+
+    #[test]
+    fn caller_cancellation_is_primary_and_keeps_real_failures() {
+        let error = combine_install_errors(
+            vec![
+                report!(ChromeForTestingError::Cancelled),
+                report!(ChromeForTestingError::DetermineCacheDir),
+            ],
+            true,
+        );
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::Cancelled
         ))
         .is_true();
         assert_that!(error.children().into_iter().count()).is_equal_to(1);
-    }
-}
-
-#[derive(Debug)]
-struct DownloadedBrowserArtifacts {
-    chromedriver: PathBuf,
-    chrome: Option<PathBuf>,
-    chrome_headless_shell: Option<PathBuf>,
-    cache_lease: CacheLease,
-}
-
-impl DownloadedBrowserArtifacts {
-    fn package_for(
-        &self,
-        chrome_binary: ChromeBinary,
-        version: Version,
-        platform: Platform,
-    ) -> Result<LoadedBrowserPackage> {
-        let browser_executable = match chrome_binary {
-            ChromeBinary::Chrome => {
-                self.chrome
-                    .clone()
-                    .context(ChromeForTestingError::NoArtifactDownload {
-                        artifact: ChromeForTestingArtifact::Chrome,
-                        version,
-                        platform,
-                    })?
-            }
-            ChromeBinary::ChromeHeadlessShell => self.chrome_headless_shell.clone().context(
-                ChromeForTestingError::NoArtifactDownload {
-                    artifact: ChromeForTestingArtifact::ChromeHeadlessShell,
-                    version,
-                    platform,
-                },
-            )?,
-        };
-        Ok(LoadedBrowserPackage::new(
-            chrome_binary,
-            browser_executable,
-            self.chromedriver.clone(),
-            self.cache_lease.clone(),
-        ))
     }
 }

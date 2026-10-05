@@ -9,9 +9,10 @@ pub use config::ChromeForTestingConfig;
 
 use crate::Result;
 use crate::browser::LoadedBrowserPackage;
-use crate::chromedriver::output::DriverOutputSubscription;
+use crate::chromedriver::output::{DriverOutputLine, DriverOutputSubscription};
 use crate::chromedriver::process::ChromeDriverProcess;
 use crate::manager::ChromeForTestingManager;
+use crate::manager::config::ChromeForTestingManagerConfig;
 use crate::port::Port;
 #[cfg(feature = "thirtyfour")]
 use crate::session::SessionBuilder;
@@ -54,7 +55,7 @@ shutdown_result?;
 )]
 #[cfg_attr(
     not(feature = "thirtyfour"),
-    doc = r#"
+    doc = r"
 ```no_run
 use chrome_for_testing_manager::ChromeForTesting;
 use rootcause::Report;
@@ -68,7 +69,7 @@ chrome.shutdown().await?;
 # Ok(())
 # }
 ```
-"#
+"
 )]
 #[derive(Debug)]
 pub struct ChromeForTesting {
@@ -99,8 +100,8 @@ impl ChromeForTesting {
     /// Resolve, download, and launch a managed Chrome for Testing environment.
     ///
     /// Cancellation is opt-in through the config's `cancellation` token; see the
-    /// [crate-level cancellation section](crate#cancellation-and-drop-safety) for the exact
-    /// drop-safety guarantee.
+    /// [crate-level cancellation section](crate#cancellation-and-drop-safety) for what happens
+    /// when this future is dropped.
     ///
     /// # Errors
     ///
@@ -109,12 +110,23 @@ impl ChromeForTesting {
     pub async fn launch(config: ChromeForTestingConfig) -> Result<Self> {
         crate::ensure_multithreaded_runtime()?;
 
-        let (version, chrome_binary, cancellation, manager_config, driver_config) =
-            config.into_parts();
+        let ChromeForTestingConfig {
+            version,
+            chrome_binary,
+            cache_dir,
+            cancellation,
+            network,
+            lifecycle,
+            driver: driver_config,
+        } = config;
         let cancellation = cancellation.unwrap_or_default();
         crate::check_cancelled(&cancellation)?;
 
-        let manager = ChromeForTestingManager::new_with_config(manager_config)?;
+        let manager = ChromeForTestingManager::new_with_config(ChromeForTestingManagerConfig {
+            cache_dir,
+            network,
+            lifecycle,
+        })?;
         let selected = manager
             .resolve_version(version, chrome_binary.into(), cancellation.clone())
             .await?;
@@ -152,17 +164,32 @@ impl ChromeForTesting {
 
     /// Return the cached browser executable backing this environment.
     ///
-    /// Non-`thirtyfour` `WebDriver` clients connecting through [`Self::driver_port`] must register
-    /// this path as the browser binary in their session capabilities.
+    /// Non-`thirtyfour` `WebDriver` clients connecting through [`Self::driver_port`] use it as
+    /// follows:
+    ///
+    /// - [`ChromeBinary::Chrome`](crate::ChromeBinary::Chrome): register this path as the browser
+    ///   binary (`goog:chromeOptions.binary`) in the session capabilities.
+    /// - [`ChromeBinary::ChromeHeadlessShell`](crate::ChromeBinary::ChromeHeadlessShell): launch
+    ///   this executable with `--remote-debugging-port`, then attach `ChromeDriver` to it through
+    ///   `goog:chromeOptions.debuggerAddress`. This is what the managed `thirtyfour` sessions do.
     #[must_use]
     pub fn browser_executable(&self) -> &Path {
         self.loaded.browser_executable()
     }
 
     /// Subscribe to future `ChromeDriver` output without backpressuring the child process.
+    ///
+    /// Use [`Self::recent_output`] for lines printed before subscribing.
     #[must_use]
     pub fn subscribe_output(&self) -> DriverOutputSubscription {
         self.driver.subscribe_output()
+    }
+
+    /// Return the most recent `ChromeDriver` output lines (up to 256, from spawn on), oldest
+    /// first.
+    #[must_use]
+    pub fn recent_output(&self) -> Vec<DriverOutputLine> {
+        self.driver.recent_output()
     }
 
     /// Gracefully shut down the managed Chrome for Testing environment.

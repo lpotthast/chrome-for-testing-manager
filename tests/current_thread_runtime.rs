@@ -15,6 +15,7 @@ async fn unusable_on_non_multithreaded_runtime() -> Result<(), Report> {
         error.current_context(),
         ChromeForTestingError::UnsupportedRuntime {
             runtime_flavor: tokio::runtime::RuntimeFlavor::CurrentThread,
+            ..
         }
     ))
     .is_true();

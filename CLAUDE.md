@@ -25,9 +25,9 @@ just minimal-versions                                      # Verify minimum depe
 Unit tests in `src/` are hermetic: they use local `axum` fixture servers and fake shell-script executables, no network
 or real Chrome. Integration tests in `tests/` spawn real ChromeDriver processes and hit the Chrome for Testing API;
 the `thirtyfour`-dependent ones are declared with `required-features` in `Cargo.toml`, so they run under default or
-`--all-features` builds and are skipped without the feature. They share one checkout-local cache
-(`target/integration-test-cache/shared`) and may run concurrently; the cache's cross-process file locks make
-concurrent installs safe (no `serial_test`).
+`--all-features` builds and are skipped without the feature. They share one cache under `CARGO_TARGET_TMPDIR`
+(`target/tmp/integration-test-cache/shared` by default) and may run concurrently; the cache's cross-process file
+locks make concurrent installs safe (no `serial_test`).
 
 ## Architecture
 
@@ -61,15 +61,17 @@ Lower-level orchestration (`ChromeForTestingManager` in `src/manager/`):
   process, parses the reported port, probes `/status`, and returns a guarded handle with `subscribe_output()`.
 - `prepare_caps(&LoadedBrowserPackage)` (feature `thirtyfour`) builds `ChromeCapabilities` pre-wired with the cached
   Chrome binary path and headless flag.
-- The manager owns two `reqwest` clients: one external (manifest default timeout; artifact downloads override
-  per-request) and one no-proxy local client (driver status + DevTools, fixed 10 s deadline).
+- The manager owns three `reqwest` clients: one external (manifest default timeout; artifact downloads override
+  per-request), one no-proxy local client (driver status + DevTools, fixed 10 s deadline), and (feature `thirtyfour`)
+  one no-proxy `WebDriver` client (`NetworkPolicy::webdriver_request_timeout`).
 
 Supporting modules: `artifact_store/` (download, hardened ZIP extraction, installation transactions), `cache/` (typed
 shared/exclusive file-lock guards, clear/prune), `chromedriver/` (config, guarded process, output fan-out),
-`session/` (builder, Headless Shell launch), `version/` (requests + resolver), `process_support` (shared
-guarded-process spawn/startup scaffolding used by both driver and Headless Shell), `policy.rs` (`NetworkPolicy`,
-`LifecyclePolicy`), `operation.rs` (`AbortSafeOperation` task-transfer used only for cleanup-sensitive operations:
-install, launch, WebDriver connect/cleanup).
+`session/` (builder, Headless Shell launch), `version/` (requests + resolver), `process_support` (`ManagedProcess`:
+guarded spawn, output capture, startup, and terminate-then-drain, shared by driver and Headless Shell), `policy.rs`
+(`NetworkPolicy`, `LifecyclePolicy`). Dropped futures are covered without background tasks: installs cancel through a
+drop guard on their token, processes terminate on drop, and a session run hands cleanup to the runtime from a drop
+guard.
 
 Cancellation is opt-in and cooperative; the single authoritative description of the drop-safety guarantee lives in
 the crate-level docs section "Cancellation and drop safety" in `lib.rs` - link to it instead of restating it in

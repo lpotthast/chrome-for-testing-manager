@@ -1,129 +1,245 @@
 //! Atomic installation transactions for individual browser or driver artifacts.
 //!
-//! Each installer validates already-installed packages through cheap metadata (completion marker
-//! plus executable size) before taking any lock. Actual installation holds an artifact-specific
-//! exclusive lock, stages and validates content, then publishes with a same-filesystem rename.
+//! Each installation validates an already-installed package through cheap metadata (completion
+//! marker plus executable size) before taking its artifact lock. Actual installation holds an
+//! artifact-specific exclusive lock, stages and validates content, then publishes with a
+//! same-filesystem rename.
+//!
+//! Every temporary entry in a platform directory carries its artifact name between `.`
+//! delimiters (`.staging.<artifact>.<pid>.<seq>`, `.trash.<artifact>.<pid>.<seq>`). An installation
+//! only ever touches entries of its own artifact, which it may do because it holds that artifact's
+//! lock. Packages are removed by renaming them to a trash entry first, so an interrupted removal
+//! never leaves a partial package that could pass validation.
 
-use super::{download, extract};
-use crate::cache::CacheDir;
+use super::{ArtifactStore, download, extract};
+use crate::cache;
 use crate::error::operation_result_with_cleanup;
 use crate::{CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, Result};
 use ::chrome_for_testing::{Platform, Version};
-use rootcause::{Report, bail, prelude::ResultExt};
+use rootcause::{bail, prelude::ResultExt};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tokio::fs;
 
-const COMPLETION_MARKER: &str = ".chrome-for-testing-manager-complete";
-const MARKER_SCHEMA: u32 = 2;
-static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(crate) const COMPLETION_MARKER: &str = ".chrome-for-testing-manager-complete";
+const MARKER_SCHEMA: u32 = 3;
 
-pub(crate) struct ArtifactInstaller<'a> {
-    pub cache_dir: &'a CacheDir,
-    pub client: &'a reqwest::Client,
-    pub platform: Platform,
-    pub artifact_timeout: Duration,
-}
-
+/// One artifact to install: where to download it from and where its executable lives inside the
+/// package (relative to the platform directory, starting with the package's root directory).
 pub(super) struct ArtifactRequest<'a> {
     pub(super) artifact: ChromeForTestingArtifact,
     pub(super) url: &'a str,
     pub(super) executable: &'static Path,
 }
 
-impl ArtifactInstaller<'_> {
-    /// Install one package transactionally and return its final executable path.
-    pub async fn install(
+/// Paths and identity of one package installation, derived once from its request.
+struct InstallPlan<'a> {
+    version: Version,
+    request: &'a ArtifactRequest<'a>,
+    platform_dir: PathBuf,
+    /// The package's top-level directory, relative to the platform directory. Always a single
+    /// normal path component.
+    package_root: &'a Path,
+    final_package: PathBuf,
+    final_executable: PathBuf,
+    identity: String,
+}
+
+impl<'a> InstallPlan<'a> {
+    fn new(
+        cache_dir: &Path,
+        platform: Platform,
+        version: Version,
+        request: &'a ArtifactRequest<'a>,
+    ) -> Result<Self> {
+        let package_root = match request.executable.components().next() {
+            Some(Component::Normal(root)) => Path::new(root),
+            _ => bail!(ChromeForTestingError::InvalidPackageExecutablePath {
+                path: request.executable.to_owned(),
+            }),
+        };
+        let platform_dir = cache_dir
+            .join(version.to_string())
+            .join(platform.to_string());
+        Ok(Self {
+            version,
+            request,
+            final_package: platform_dir.join(package_root),
+            final_executable: platform_dir.join(request.executable),
+            platform_dir,
+            package_root,
+            identity: format!(
+                "schema={MARKER_SCHEMA}\nartifact={}\nversion={version}\nplatform={platform}\n",
+                request.artifact
+            ),
+        })
+    }
+
+    fn artifact(&self) -> ChromeForTestingArtifact {
+        self.request.artifact
+    }
+
+    /// Prefix of this artifact's staging directories. The trailing delimiter keeps `chrome` from
+    /// matching `chrome-headless-shell`.
+    fn staging_prefix(&self) -> String {
+        format!(".staging.{}.", self.artifact())
+    }
+
+    /// Prefix of this artifact's trash entries.
+    fn trash_prefix(&self) -> String {
+        format!(".trash.{}.", self.artifact())
+    }
+
+    /// Whether the published package is complete.
+    ///
+    /// Cheap metadata validation: the executable must exist as a regular file whose size matches
+    /// the completion marker written at install time. Deliberately no content hashing: the marker
+    /// is written only after a fully successful extraction, and re-hashing hundreds of megabytes on
+    /// every cache hit would defeat the lock-free fast path. The cache is a per-user directory;
+    /// this validation detects incomplete installs, not deliberate tampering by an actor who could
+    /// equally rewrite the marker.
+    ///
+    /// Missing, mistyped (e.g. a file where a directory belongs), or mismatching entries mean
+    /// "incomplete", so the package is replaced. Other I/O errors are returned, so that a transient
+    /// failure never causes a package in use to be replaced.
+    async fn package_is_complete(&self) -> io::Result<bool> {
+        let incomplete = |error: &io::Error| {
+            matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::NotADirectory
+                    | io::ErrorKind::IsADirectory
+                    | io::ErrorKind::InvalidData
+            )
+        };
+        let metadata = match fs::metadata(&self.final_executable).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(false),
+            Err(error) if incomplete(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let marker = match fs::read_to_string(self.final_package.join(COMPLETION_MARKER)).await {
+            Ok(marker) => marker,
+            Err(error) if incomplete(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let Some(validation) = marker.strip_prefix(&self.identity) else {
+            return Ok(false);
+        };
+        let executable_size = validation
+            .lines()
+            .find_map(|line| line.strip_prefix("executable_size="))
+            .and_then(|value| value.parse::<u64>().ok());
+        Ok(executable_size == Some(metadata.len()))
+    }
+
+    fn marker_contents(&self, executable_size: u64) -> String {
+        format!("{}executable_size={executable_size}\n", self.identity)
+    }
+}
+
+impl ArtifactStore {
+    /// Install `request` if present. On failure, cancel the sibling installations sharing
+    /// `siblings`, so that a transaction fails fast.
+    pub(super) async fn install_artifact_or_cancel(
         &self,
         version: Version,
-        artifact: ChromeForTestingArtifact,
-        url: &str,
-        relative_executable: &Path,
+        request: Option<ArtifactRequest<'_>>,
+        siblings: &CancellationToken,
+    ) -> Result<Option<PathBuf>> {
+        let Some(request) = request else {
+            return Ok(None);
+        };
+        let result = self
+            .install_artifact(version, &request, siblings.clone())
+            .await;
+        if result.is_err() {
+            siblings.cancel();
+        }
+        result.map(Some)
+    }
+
+    /// Install one package transactionally and return its final executable path.
+    async fn install_artifact(
+        &self,
+        version: Version,
+        request: &ArtifactRequest<'_>,
         cancellation: CancellationToken,
     ) -> Result<PathBuf> {
-        let platform_dir = self
-            .cache_dir
-            .path()
-            .join(version.to_string())
-            .join(self.platform.to_string());
-        let package_root = Self::package_root(relative_executable)?;
-        let final_package = platform_dir.join(package_root);
-        let final_executable = platform_dir.join(relative_executable);
-        let expected_identity = Self::marker_identity(version, self.platform, artifact, url);
+        let plan = InstallPlan::new(self.cache_dir.path(), self.platform, version, request)?;
 
         // Fast path: an already-installed package is validated through metadata only, without
-        // taking the artifact lock, so concurrent launches never serialize on cache hits.
-        if Self::package_is_complete(&final_package, &final_executable, &expected_identity).await {
-            return Ok(final_executable);
+        // taking the artifact lock, so concurrent launches never serialize on cache hits. Errors
+        // fall through to the locked re-check, which reports them.
+        if plan.package_is_complete().await.unwrap_or(false) {
+            return Ok(plan.final_executable);
         }
 
         let _artifact_lock = self
             .cache_dir
-            .acquire_artifact(version, self.platform, artifact, cancellation.clone())
+            .acquire_artifact(version, self.platform, plan.artifact(), &cancellation)
             .await?;
         crate::check_cancelled(&cancellation)?;
 
-        fs::create_dir_all(&platform_dir)
-            .await
-            .context(ChromeForTestingError::CreateCacheDir {
-                cache_dir: platform_dir.clone(),
-            })?;
-        Self::remove_stale_staging_dirs(&platform_dir, artifact).await?;
-
         // Re-check under the lock: a concurrent installer may have completed the package while
         // this caller waited for the lock.
-        if Self::package_is_complete(&final_package, &final_executable, &expected_identity).await {
+        let complete = plan.package_is_complete().await.context(
+            ChromeForTestingError::ValidateInstalledPackage {
+                path: plan.final_package.clone(),
+            },
+        )?;
+        if complete {
             tracing::info!(
-                artifact = %artifact,
+                artifact = %plan.artifact(),
                 %version,
-                path = %final_executable.display(),
+                path = %plan.final_executable.display(),
                 "artifact already installed"
             );
-            return Ok(final_executable);
+            return Ok(plan.final_executable);
         }
 
-        Self::remove_incomplete_package(&final_package).await?;
+        fs::create_dir_all(&plan.platform_dir).await.context(
+            ChromeForTestingError::CreateCacheDir {
+                cache_dir: plan.platform_dir.clone(),
+            },
+        )?;
+        Self::remove_leftovers(&plan).await;
+        cache::remove_tree(&plan.final_package, &plan.trash_prefix())
+            .await
+            .context(ChromeForTestingError::RemoveStaleArtifact {
+                path: plan.final_package.clone(),
+            })?;
         crate::check_cancelled(&cancellation)?;
 
-        let staging = Self::create_unique_staging_dir(&platform_dir, artifact).await?;
+        let staging = cache::create_unique_dir(&plan.platform_dir, &plan.staging_prefix())
+            .await
+            .context(ChromeForTestingError::CreateStagingDir {
+                path: plan.platform_dir.clone(),
+            })?;
         let install_result = self
-            .install_in_staging(
-                version,
-                artifact,
-                url,
-                relative_executable,
-                package_root,
-                &expected_identity,
-                &staging,
-                &final_package,
-                &cancellation,
-            )
+            .install_in_staging(&plan, &staging, &cancellation)
             .await;
-        let cleanup_result = Self::remove_staging_dir(&staging).await;
+        let cleanup_result = fs::remove_dir_all(&staging)
+            .await
+            .or_else(cache::ignore_not_found)
+            .context(ChromeForTestingError::RemoveStaleArtifact { path: staging });
         operation_result_with_cleanup(install_result, cleanup_result)?;
-        Ok(final_executable)
+        Ok(plan.final_executable)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn install_in_staging(
         &self,
-        version: Version,
-        artifact: ChromeForTestingArtifact,
-        url: &str,
-        relative_executable: &Path,
-        package_root: &Path,
-        expected_identity: &str,
+        plan: &InstallPlan<'_>,
         staging: &Path,
-        final_package: &Path,
         cancellation: &CancellationToken,
     ) -> Result<()> {
+        let artifact = plan.artifact();
+        let version = plan.version;
         tracing::info!(artifact = %artifact, %version, "installing artifact");
         let archive_path = staging.join(format!("{artifact}.zip"));
         download::download_artifact_archive(
-            self.client,
-            url,
+            &self.client,
+            plan.request.url,
             &archive_path,
             artifact,
             self.artifact_timeout,
@@ -133,9 +249,10 @@ impl ArtifactInstaller<'_> {
 
         let unpack_dir = staging.join("unpacked");
         extract::extract_zip(
-            archive_path.clone(),
+            artifact,
+            archive_path,
             unpack_dir.clone(),
-            package_root.to_owned(),
+            plan.package_root.to_owned(),
             cancellation.clone(),
         )
         .await?;
@@ -143,7 +260,7 @@ impl ArtifactInstaller<'_> {
         // Successful extraction is the commit point: the remaining validation and publication
         // steps are cheap, so the transaction completes even when cancellation arrives now,
         // making the installed artifact reusable by the next run.
-        let staged_executable = unpack_dir.join(relative_executable);
+        let staged_executable = unpack_dir.join(plan.request.executable);
         let executable_metadata = match fs::metadata(&staged_executable).await {
             Ok(metadata) if metadata.is_file() => metadata,
             _ => bail!(ChromeForTestingError::MissingExtractedExecutable {
@@ -151,217 +268,127 @@ impl ArtifactInstaller<'_> {
             }),
         };
 
-        let staged_package = unpack_dir.join(package_root);
-        let package_metadata = fs::symlink_metadata(&staged_package).await.context(
-            ChromeForTestingError::MissingExtractedExecutable {
-                path: staged_package.clone(),
-            },
-        )?;
-        if !package_metadata.is_dir() || package_metadata.file_type().is_symlink() {
-            bail!(ChromeForTestingError::InvalidPackageExecutablePath {
-                path: relative_executable.to_owned(),
-            });
-        }
-
+        // Extraction rejects a symlink at the package root and never creates an entry beneath a
+        // symlink, so the package root holding the executable is a real directory.
+        let staged_package = unpack_dir.join(plan.package_root);
         let marker_path = staged_package.join(COMPLETION_MARKER);
         fs::write(
             &marker_path,
-            Self::marker_contents(expected_identity, executable_metadata.len()),
+            plan.marker_contents(executable_metadata.len()),
         )
         .await
         .context(ChromeForTestingError::WriteCompletionMarker {
             path: marker_path.clone(),
         })?;
 
-        fs::remove_file(&archive_path).await.context(
-            ChromeForTestingError::RemoveStaleArtifact {
-                path: archive_path.clone(),
-            },
-        )?;
-
-        fs::rename(&staged_package, final_package).await.context(
-            ChromeForTestingError::InstallCompletedPackage {
+        fs::rename(&staged_package, &plan.final_package)
+            .await
+            .context(ChromeForTestingError::InstallCompletedPackage {
                 from: staged_package,
-                to: final_package.to_owned(),
-            },
-        )?;
+                to: plan.final_package.clone(),
+            })?;
         tracing::info!(
             artifact = %artifact,
             %version,
-            path = %final_package.display(),
+            path = %plan.final_package.display(),
             "artifact installation complete"
         );
         Ok(())
     }
 
-    pub(super) async fn install_and_cancel_siblings(
-        &self,
-        version: Version,
-        request: ArtifactRequest<'_>,
-        cancellation: CancellationToken,
-    ) -> Result<PathBuf> {
-        let result = self
-            .install(
-                version,
-                request.artifact,
-                request.url,
-                request.executable,
-                cancellation.clone(),
-            )
-            .await;
-        if result.is_err() {
-            cancellation.cancel();
-        }
-        result
-    }
-
-    pub(super) async fn install_optional_and_cancel_siblings(
-        &self,
-        version: Version,
-        request: Option<ArtifactRequest<'_>>,
-        cancellation: CancellationToken,
-    ) -> Result<Option<PathBuf>> {
-        match request {
-            Some(request) => self
-                .install_and_cancel_siblings(version, request, cancellation)
-                .await
-                .map(Some),
-            None => Ok(None),
-        }
-    }
-
-    fn package_root(relative_executable: &Path) -> Result<&Path> {
-        match relative_executable.components().next() {
-            Some(Component::Normal(root)) => Ok(Path::new(root)),
-            _ => {
-                bail!(ChromeForTestingError::InvalidPackageExecutablePath {
-                    path: relative_executable.to_owned(),
-                });
+    /// Remove staging and trash entries that interrupted installs of this artifact left behind.
+    ///
+    /// Best effort: a leftover that cannot be removed (e.g. a file still open on Windows) must not
+    /// block installing the package.
+    async fn remove_leftovers(plan: &InstallPlan<'_>) {
+        for prefix in [plan.staging_prefix(), plan.trash_prefix()] {
+            if let Err(error) = cache::remove_entries_with_prefix(&plan.platform_dir, &prefix).await
+            {
+                tracing::warn!(
+                    artifact = %plan.artifact(),
+                    dir = %plan.platform_dir.display(),
+                    %error,
+                    "failed to remove leftovers of an interrupted installation"
+                );
             }
         }
-    }
-
-    /// Cheap metadata validation of an installed package: the executable must exist as a regular
-    /// file whose size matches the completion marker written at install time. Deliberately no
-    /// content hashing: the marker is written only after a fully successful extraction, and
-    /// re-hashing hundreds of megabytes on every cache hit would defeat the lock-free fast path.
-    /// The cache is a per-user directory; this validation detects incomplete installs, not
-    /// deliberate tampering by an actor who could equally rewrite the marker.
-    async fn package_is_complete(
-        package: &Path,
-        executable: &Path,
-        expected_identity: &str,
-    ) -> bool {
-        let Ok(metadata) = fs::metadata(executable).await else {
-            return false;
-        };
-        if !metadata.is_file() {
-            return false;
-        }
-        let Ok(marker) = fs::read_to_string(package.join(COMPLETION_MARKER)).await else {
-            return false;
-        };
-        let Some(validation) = marker.strip_prefix(expected_identity) else {
-            return false;
-        };
-        let mut executable_size = None;
-        for line in validation.lines() {
-            if let Some(value) = line.strip_prefix("executable_size=") {
-                executable_size = value.parse::<u64>().ok();
-            }
-        }
-        executable_size == Some(metadata.len())
-    }
-
-    async fn remove_incomplete_package(package: &Path) -> Result<()> {
-        let metadata = match fs::symlink_metadata(package).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(Report::new_sendsync(error).context(
-                    ChromeForTestingError::RemoveStaleArtifact {
-                        path: package.to_owned(),
-                    },
-                ));
-            }
-        };
-        let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            fs::remove_dir_all(package).await
-        } else {
-            fs::remove_file(package).await
-        };
-        result.context(ChromeForTestingError::RemoveStaleArtifact {
-            path: package.to_owned(),
-        })
-    }
-
-    async fn create_unique_staging_dir(
-        platform_dir: &Path,
-        artifact: ChromeForTestingArtifact,
-    ) -> Result<PathBuf> {
-        loop {
-            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = platform_dir.join(format!(
-                ".staging-{artifact}-{}-{sequence}",
-                std::process::id()
-            ));
-            match fs::create_dir(&path).await {
-                Ok(()) => return Ok(path),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(Report::new_sendsync(error)
-                        .context(ChromeForTestingError::CreateStagingDir { path }));
-                }
-            }
-        }
-    }
-
-    async fn remove_staging_dir(staging: &Path) -> Result<()> {
-        match fs::remove_dir_all(staging).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(Report::new_sendsync(error).context(
-                ChromeForTestingError::RemoveStaleArtifact {
-                    path: staging.to_owned(),
-                },
-            )),
-        }
-    }
-
-    async fn remove_stale_staging_dirs(
-        platform_dir: &Path,
-        artifact: ChromeForTestingArtifact,
-    ) -> Result<()> {
-        let prefix = format!(".staging-{artifact}-");
-        let read_error = || ChromeForTestingError::ReadCacheDir {
-            cache_dir: platform_dir.to_owned(),
-        };
-        let mut entries = fs::read_dir(platform_dir).await.context_with(read_error)?;
-        while let Some(entry) = entries.next_entry().await.context_with(read_error)? {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                Self::remove_staging_dir(&entry.path()).await?;
-            }
-        }
-        Ok(())
-    }
-
-    fn marker_identity(
-        version: Version,
-        platform: Platform,
-        artifact: ChromeForTestingArtifact,
-        url: &str,
-    ) -> String {
-        format!(
-            "schema={MARKER_SCHEMA}\nartifact={artifact}\nversion={version}\nplatform={platform}\nsource_url={url}\n"
-        )
-    }
-
-    fn marker_contents(identity: &str, executable_size: u64) -> String {
-        format!("{identity}executable_size={executable_size}\n")
     }
 }
 
 #[cfg(test)]
-pub(crate) fn completion_marker_name() -> &'static str {
-    COMPLETION_MARKER
+mod tests {
+    use super::{ArtifactRequest, COMPLETION_MARKER, InstallPlan};
+    use crate::ChromeForTestingArtifact;
+    use crate::artifact_store::ArtifactStore;
+    use crate::test_support::TestDirectory;
+    use ::chrome_for_testing::Platform;
+    use assertr::prelude::*;
+    use std::path::Path;
+
+    fn request(artifact: ChromeForTestingArtifact) -> ArtifactRequest<'static> {
+        ArtifactRequest {
+            artifact,
+            url: "https://example.invalid/artifact.zip",
+            executable: Path::new("package/executable"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chrome_leftover_cleanup_spares_headless_shell_staging() -> Result<(), rootcause::Report>
+    {
+        let directory = TestDirectory::new("installation-leftover-prefixes")?;
+        let chrome_request = request(ChromeForTestingArtifact::Chrome);
+        let headless_request = request(ChromeForTestingArtifact::ChromeHeadlessShell);
+        let version = "135.0.7019.0".parse()?;
+        let chrome = InstallPlan::new(
+            directory.path(),
+            Platform::Linux64,
+            version,
+            &chrome_request,
+        )?;
+        let headless = InstallPlan::new(
+            directory.path(),
+            Platform::Linux64,
+            version,
+            &headless_request,
+        )?;
+        let chrome_staging = chrome
+            .platform_dir
+            .join(format!("{}1.0", chrome.staging_prefix()));
+        let headless_staging = headless
+            .platform_dir
+            .join(format!("{}1.0", headless.staging_prefix()));
+        tokio::fs::create_dir_all(&chrome_staging).await?;
+        tokio::fs::create_dir_all(&headless_staging).await?;
+
+        ArtifactStore::remove_leftovers(&chrome).await;
+
+        assert_that!(tokio::fs::try_exists(&chrome_staging).await?).is_false();
+        assert_that!(tokio::fs::try_exists(&headless_staging).await?).is_true();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mistyped_package_entries_count_as_incomplete() -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("installation-mistyped-package")?;
+        let chrome_request = request(ChromeForTestingArtifact::Chrome);
+        let plan = InstallPlan::new(
+            directory.path(),
+            Platform::Linux64,
+            "135.0.7019.0".parse()?,
+            &chrome_request,
+        )?;
+        tokio::fs::create_dir_all(&plan.platform_dir).await?;
+
+        // A file where the package directory belongs.
+        tokio::fs::write(&plan.final_package, "not a directory").await?;
+        assert_that!(plan.package_is_complete().await?).is_false();
+
+        // A directory where the marker file belongs.
+        tokio::fs::remove_file(&plan.final_package).await?;
+        tokio::fs::create_dir_all(plan.final_package.join(COMPLETION_MARKER)).await?;
+        tokio::fs::write(&plan.final_executable, "browser").await?;
+        assert_that!(plan.package_is_complete().await?).is_false();
+        Ok(())
+    }
 }

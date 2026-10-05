@@ -5,6 +5,11 @@
 //!
 //! Directory trees are removed by renaming them to a trash entry first (see [`remove_tree`]), so
 //! an interrupted removal never leaves a partial version or package behind under its real name.
+//!
+//! Everything this crate stores lives in a layout directory ([`LAYOUT_DIR`]) beneath the cache
+//! root. Versions of this crate with an incompatible on-disk layout therefore never share
+//! directories, so none of them can mistake a package another one installed, and is possibly
+//! running, for an incomplete one and replace it.
 
 mod lock;
 
@@ -16,8 +21,14 @@ use rootcause::{Report, option_ext::OptionExt, prelude::ResultExt};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::fs;
 
+/// Directory beneath the cache root holding versions and locks of the current on-disk layout.
+///
+/// Bump this whenever the layout or the completion marker changes incompatibly. Pre-0.13 releases
+/// stored versions directly in the cache root; those directories are left untouched.
+const LAYOUT_DIR: &str = "v1";
 const LOCKS_DIR: &str = ".locks";
 const CACHE_LOCK: &str = "cache.lock";
 /// Prefix of version directories being removed from the cache root.
@@ -27,10 +38,19 @@ static ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// How often a cache mutation tries to acquire the exclusive cache lock.
 const MUTATION_LOCK_ATTEMPTS: u32 = 10;
 /// Delay between attempts to acquire the exclusive cache lock.
-const MUTATION_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+const MUTATION_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+/// How often a file-system operation is attempted while Windows reports the entry as locked.
+const LOCKED_ENTRY_ATTEMPTS: u32 = if cfg!(windows) { 8 } else { 1 };
+/// Initial delay between attempts on a locked entry; doubled after every attempt.
+const LOCKED_ENTRY_RETRY_DELAY: Duration = Duration::from_millis(25);
 
+/// The cache root chosen by the user, and the layout directory beneath it that holds the cache
+/// contents.
 #[derive(Debug, Clone)]
-pub(crate) struct CacheDir(PathBuf);
+pub(crate) struct CacheDir {
+    root: PathBuf,
+    layout: PathBuf,
+}
 
 /// Summary returned after pruning unretained version directories from the cache.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,16 +80,26 @@ impl CacheDir {
     }
 
     pub fn create_at(cache_dir: PathBuf) -> Result<Self, Report<ChromeForTestingError>> {
-        std::fs::create_dir_all(cache_dir.join(LOCKS_DIR)).context(
+        let layout = cache_dir.join(LAYOUT_DIR);
+        std::fs::create_dir_all(layout.join(LOCKS_DIR)).context(
             ChromeForTestingError::CreateCacheDir {
                 cache_dir: cache_dir.clone(),
             },
         )?;
-        Ok(Self(cache_dir))
+        Ok(Self {
+            root: cache_dir,
+            layout,
+        })
     }
 
+    /// The cache root chosen by the user.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The layout directory holding version directories and locks.
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.layout
     }
 
     pub async fn acquire_shared(
@@ -87,7 +117,7 @@ impl CacheDir {
         cancellation: &CancellationToken,
     ) -> Result<ArtifactLock, Report<ChromeForTestingError>> {
         let lock_path = self
-            .0
+            .layout
             .join(LOCKS_DIR)
             .join(format!("{version}-{platform}-{artifact}.lock"));
         lock::artifact_lock(&lock_path, cancellation).await
@@ -115,15 +145,18 @@ impl CacheDir {
         should_remove: impl Fn(&Version) -> bool,
     ) -> Result<CachePruneResult, Report<ChromeForTestingError>> {
         let _mutation_guard = self.try_mutation_guard().await?;
-        // Leftovers of interrupted removals.
-        remove_entries_with_prefix(&self.0, VERSION_TRASH_PREFIX)
-            .await
-            .context(ChromeForTestingError::RemoveCacheEntry {
-                path: self.0.clone(),
-            })?;
+        // Leftovers of interrupted removals. Best effort: an entry that cannot be removed yet (e.g.
+        // on Windows, a browser still running from it) must not block every later clear or prune.
+        if let Err(error) = remove_entries_with_prefix(&self.layout, VERSION_TRASH_PREFIX).await {
+            tracing::warn!(
+                dir = %self.layout.display(),
+                %error,
+                "failed to remove leftovers of an interrupted cache removal"
+            );
+        }
 
         let read_error = || ChromeForTestingError::ReadCacheDir {
-            cache_dir: self.0.clone(),
+            cache_dir: self.layout.clone(),
         };
         let mut removed_versions = Vec::new();
         let mut entries = fs::read_dir(self.path()).await.context_with(read_error)?;
@@ -155,7 +188,7 @@ impl CacheDir {
     /// exclusive mutation guard rules out, so no lock file is in use. Best effort: a remaining
     /// lock file is harmless.
     async fn remove_version_locks(&self, version: Version) {
-        let locks_dir = self.0.join(LOCKS_DIR);
+        let locks_dir = self.layout.join(LOCKS_DIR);
         if let Err(error) = remove_entries_with_prefix(&locks_dir, &format!("{version}-")).await {
             tracing::warn!(
                 %version,
@@ -182,12 +215,12 @@ impl CacheDir {
         )
         .await?
         .context(ChromeForTestingError::CacheInUse {
-            cache_dir: self.0.clone(),
+            cache_dir: self.root.clone(),
         })
     }
 
     fn cache_lock_path(&self) -> PathBuf {
-        self.0.join(LOCKS_DIR).join(CACHE_LOCK)
+        self.layout.join(LOCKS_DIR).join(CACHE_LOCK)
     }
 }
 
@@ -206,7 +239,7 @@ pub(crate) async fn remove_tree(path: &Path, trash_prefix: &str) -> io::Result<(
     }
     let trash = loop {
         let trash = path.with_file_name(unique_entry_name(trash_prefix));
-        match fs::rename(path, &trash).await {
+        match retry_while_locked(|| fs::rename(path, &trash)).await {
             Ok(()) => break trash,
             // A leftover of a crashed process with a reused pid occupies the name.
             Err(error)
@@ -217,7 +250,33 @@ pub(crate) async fn remove_tree(path: &Path, trash_prefix: &str) -> io::Result<(
             Err(error) => return Err(error),
         }
     };
-    fs::remove_dir_all(&trash).await
+    retry_while_locked(|| fs::remove_dir_all(&trash)).await
+}
+
+/// Run a file-system operation, retrying with backoff while Windows reports the entry as locked.
+///
+/// Virus scanners and indexers briefly open freshly written files, which makes renaming or
+/// removing their directory fail with `PermissionDenied` until they let go. Elsewhere, the
+/// operation runs once.
+pub(crate) async fn retry_while_locked<T, Fut>(mut operation: impl FnMut() -> Fut) -> io::Result<T>
+where
+    Fut: Future<Output = io::Result<T>>,
+{
+    let mut delay = LOCKED_ENTRY_RETRY_DELAY;
+    let mut attempt = 1;
+    loop {
+        match operation().await {
+            Err(error)
+                if attempt < LOCKED_ENTRY_ATTEMPTS
+                    && error.kind() == io::ErrorKind::PermissionDenied =>
+            {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Create a new directory in `parent` whose name starts with `prefix` and is unique.
@@ -240,24 +299,32 @@ fn unique_entry_name(prefix: &str) -> String {
 }
 
 /// Remove every entry of `dir` whose name starts with `prefix`. A missing `dir` has none.
+///
+/// An entry that cannot be removed does not stop the removal of the others; the first such error
+/// is returned once every entry was attempted.
 pub(crate) async fn remove_entries_with_prefix(dir: &Path, prefix: &str) -> io::Result<()> {
     let mut entries = match fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(error) => return ignore_not_found(error),
     };
+    let mut first_error = None;
     while let Some(entry) = entries.next_entry().await? {
         if !entry.file_name().to_string_lossy().starts_with(prefix) {
             continue;
         }
         let path = entry.path();
-        let result = if entry.file_type().await?.is_dir() {
-            fs::remove_dir_all(&path).await
-        } else {
-            fs::remove_file(&path).await
+        let result = match entry.file_type().await {
+            Ok(file_type) if file_type.is_dir() => {
+                retry_while_locked(|| fs::remove_dir_all(&path)).await
+            }
+            Ok(_) => retry_while_locked(|| fs::remove_file(&path)).await,
+            Err(error) => Err(error),
         };
-        result.or_else(ignore_not_found)?;
+        if let Err(error) = result.or_else(ignore_not_found) {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Treat a missing entry as already removed.
@@ -318,6 +385,55 @@ mod tests {
         assert_that!(tokio::fs::try_exists(cache.path().join(".trash.1.0")).await?).is_false();
         assert_that!(tokio::fs::try_exists(&lock).await?).is_false();
         assert_that!(tokio::fs::try_exists(cache.path().join("owner-note")).await?).is_true();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_leaves_version_directories_of_other_layouts_untouched()
+    -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("cache-clear-legacy-layout")?;
+        let cache = CacheDir::create_at(directory.path().to_owned())?;
+        let version: Version = "135.0.7019.0".parse()?;
+        // Pre-0.13 releases stored versions directly in the cache root.
+        let legacy_package = cache.root().join(version.to_string()).join("linux64");
+        tokio::fs::create_dir_all(&legacy_package).await?;
+        tokio::fs::create_dir_all(cache.path().join(version.to_string())).await?;
+
+        cache.clear().await?;
+
+        assert_that!(cache.path().starts_with(cache.root())).is_true();
+        assert_that!(cache.path()).is_not_equal_to(cache.root());
+        assert_that!(tokio::fs::try_exists(cache.path().join(version.to_string())).await?)
+            .is_false();
+        assert_that!(tokio::fs::try_exists(&legacy_package).await?).is_true();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prefix_removal_continues_past_entries_it_cannot_remove()
+    -> Result<(), rootcause::Report> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new("cache-prefix-removal")?;
+        let stuck = directory.path().join(".trash.stuck");
+        tokio::fs::create_dir_all(stuck.join("child")).await?;
+        tokio::fs::create_dir_all(directory.path().join(".trash.other")).await?;
+        tokio::fs::write(directory.path().join("kept"), "").await?;
+        // Without write access, the child of the stuck entry cannot be removed.
+        tokio::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).await?;
+
+        let result = super::remove_entries_with_prefix(directory.path(), ".trash.").await;
+        let stuck_remains = tokio::fs::try_exists(&stuck).await?;
+        if stuck_remains {
+            tokio::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+
+        // A privileged user can remove the stuck entry; the others must be removed either way.
+        assert_that!(result.is_err()).is_equal_to(stuck_remains);
+        assert_that!(tokio::fs::try_exists(directory.path().join(".trash.other")).await?)
+            .is_false();
+        assert_that!(tokio::fs::try_exists(directory.path().join("kept")).await?).is_true();
         Ok(())
     }
 

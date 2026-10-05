@@ -10,32 +10,39 @@
 //! only ever touches entries of its own artifact, which it may do because it holds that artifact's
 //! lock. Packages are removed by renaming them to a trash entry first, so an interrupted removal
 //! never leaves a partial package that could pass validation.
+//!
+//! The locked part of an installation runs as a Tokio task owning the artifact lock and a cache
+//! lease. A dropped caller cancels it through its token, but cannot release the lock or the lease
+//! while the transaction's file-system work (including its blocking extraction worker) is still in
+//! flight: the task rolls back first, so the next holder of the lock never races a detached writer.
 
 use super::{ArtifactStore, download, extract};
-use crate::cache;
+use crate::cache::{self, CacheLease};
 use crate::error::operation_result_with_cleanup;
 use crate::{CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, Result};
 use ::chrome_for_testing::{Platform, Version};
-use rootcause::{bail, prelude::ResultExt};
+use rootcause::{Report, bail, prelude::ResultExt};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 pub(crate) const COMPLETION_MARKER: &str = ".chrome-for-testing-manager-complete";
+/// Version of the completion marker format. A different marker invalidates installed packages, so
+/// prefer bumping the cache layout directory over bumping this within one layout.
 const MARKER_SCHEMA: u32 = 3;
 
 /// One artifact to install: where to download it from and where its executable lives inside the
 /// package (relative to the platform directory, starting with the package's root directory).
-pub(super) struct ArtifactRequest<'a> {
+pub(super) struct ArtifactRequest {
     pub(super) artifact: ChromeForTestingArtifact,
-    pub(super) url: &'a str,
+    pub(super) url: String,
     pub(super) executable: &'static Path,
 }
 
 /// Paths and identity of one package installation, derived once from its request.
 struct InstallPlan<'a> {
     version: Version,
-    request: &'a ArtifactRequest<'a>,
+    request: &'a ArtifactRequest,
     platform_dir: PathBuf,
     /// The package's top-level directory, relative to the platform directory. Always a single
     /// normal path component.
@@ -50,7 +57,7 @@ impl<'a> InstallPlan<'a> {
         cache_dir: &Path,
         platform: Platform,
         version: Version,
-        request: &'a ArtifactRequest<'a>,
+        request: &'a ArtifactRequest,
     ) -> Result<Self> {
         let package_root = match request.executable.components().next() {
             Some(Component::Normal(root)) => Path::new(root),
@@ -141,18 +148,36 @@ impl<'a> InstallPlan<'a> {
 impl ArtifactStore {
     /// Install `request` if present. On failure, cancel the sibling installations sharing
     /// `siblings`, so that a transaction fails fast.
+    ///
+    /// The installation runs as a task holding a clone of `cache_lease`; see the module docs.
     pub(super) async fn install_artifact_or_cancel(
         &self,
         version: Version,
-        request: Option<ArtifactRequest<'_>>,
+        request: Option<ArtifactRequest>,
+        cache_lease: &CacheLease,
         siblings: &CancellationToken,
     ) -> Result<Option<PathBuf>> {
         let Some(request) = request else {
             return Ok(None);
         };
-        let result = self
-            .install_artifact(version, &request, siblings.clone())
-            .await;
+        let store = self.clone();
+        let cache_lease = cache_lease.clone();
+        let cancellation = siblings.clone();
+        let installation = tokio::spawn(async move {
+            let result = store
+                .install_artifact(version, &request, cancellation)
+                .await;
+            drop(cache_lease);
+            result
+        });
+        let result = match installation.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            // Only possible while the runtime shuts down.
+            Err(error) => {
+                Err(Report::new_sendsync(error).context(ChromeForTestingError::Cancelled))
+            }
+        };
         if result.is_err() {
             siblings.cancel();
         }
@@ -163,7 +188,7 @@ impl ArtifactStore {
     async fn install_artifact(
         &self,
         version: Version,
-        request: &ArtifactRequest<'_>,
+        request: &ArtifactRequest,
         cancellation: CancellationToken,
     ) -> Result<PathBuf> {
         let plan = InstallPlan::new(self.cache_dir.path(), self.platform, version, request)?;
@@ -239,7 +264,7 @@ impl ArtifactStore {
         let archive_path = staging.join(format!("{artifact}.zip"));
         download::download_artifact_archive(
             &self.client,
-            plan.request.url,
+            &plan.request.url,
             &archive_path,
             artifact,
             self.artifact_timeout,
@@ -250,12 +275,17 @@ impl ArtifactStore {
         let unpack_dir = staging.join("unpacked");
         extract::extract_zip(
             artifact,
-            archive_path,
+            archive_path.clone(),
             unpack_dir.clone(),
             plan.package_root.to_owned(),
             cancellation.clone(),
         )
         .await?;
+        // Free the archive's disk space right away. Best effort: the staging cleanup removes it
+        // too, but a crash after publication would leave it behind until the cache is cleared.
+        if let Err(error) = fs::remove_file(&archive_path).await {
+            tracing::debug!(path = %archive_path.display(), %error, "failed to remove extracted archive");
+        }
 
         // Successful extraction is the commit point: the remaining validation and publication
         // steps are cheap, so the transaction completes even when cancellation arrives now,
@@ -281,7 +311,7 @@ impl ArtifactStore {
             path: marker_path.clone(),
         })?;
 
-        fs::rename(&staged_package, &plan.final_package)
+        cache::retry_while_locked(|| fs::rename(&staged_package, &plan.final_package))
             .await
             .context(ChromeForTestingError::InstallCompletedPackage {
                 from: staged_package,
@@ -325,10 +355,10 @@ mod tests {
     use assertr::prelude::*;
     use std::path::Path;
 
-    fn request(artifact: ChromeForTestingArtifact) -> ArtifactRequest<'static> {
+    fn request(artifact: ChromeForTestingArtifact) -> ArtifactRequest {
         ArtifactRequest {
             artifact,
-            url: "https://example.invalid/artifact.zip",
+            url: "https://example.invalid/artifact.zip".to_owned(),
             executable: Path::new("package/executable"),
         }
     }

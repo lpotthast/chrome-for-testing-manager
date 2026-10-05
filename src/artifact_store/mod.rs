@@ -81,9 +81,9 @@ impl ArtifactStore {
         let siblings = cancellation.child_token();
         let version = selected.version();
         let (driver, chrome, headless) = tokio::join!(
-            self.install_artifact_or_cancel(version, Some(driver_request), &siblings),
-            self.install_artifact_or_cancel(version, chrome_request, &siblings),
-            self.install_artifact_or_cancel(version, headless_request, &siblings),
+            self.install_artifact_or_cancel(version, Some(driver_request), &cache_lease, &siblings),
+            self.install_artifact_or_cancel(version, chrome_request, &cache_lease, &siblings),
+            self.install_artifact_or_cancel(version, headless_request, &cache_lease, &siblings),
         );
         let (driver, chrome, headless) = match (driver, chrome, headless) {
             (Ok(Some(driver)), Ok(chrome), Ok(headless)) if !cancellation.is_cancelled() => {
@@ -117,11 +117,11 @@ impl ArtifactStore {
     ///
     /// The resolver only selects versions providing every requested download; the error guards
     /// that invariant.
-    fn artifact_request<'a>(
+    fn artifact_request(
         &self,
-        selected: &'a SelectedVersion,
+        selected: &SelectedVersion,
         artifact: ChromeForTestingArtifact,
-    ) -> Result<ArtifactRequest<'a>> {
+    ) -> Result<ArtifactRequest> {
         let (download, executable) = match artifact {
             ChromeForTestingArtifact::Chrome => {
                 (&selected.chrome, self.platform.chrome_executable_path())
@@ -144,7 +144,7 @@ impl ArtifactStore {
             })?;
         Ok(ArtifactRequest {
             artifact,
-            url: &download.url,
+            url: download.url.clone(),
             executable,
         })
     }

@@ -6,6 +6,8 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue.svg)](https://github.com/lpotthast/chrome-for-testing-manager/blob/main/Cargo.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/chrome-for-testing-manager.svg)](#license)
 
+<!-- cargo-rdme start -->
+
 Drive a real Chrome browser from your Rust tests without ever installing Chrome yourself.
 
 `chrome-for-testing-manager` is a thin orchestration layer over Google's
@@ -33,8 +35,9 @@ and so that bumping the Chrome version under test is one simple change.
   without leaving the chain. `thirtyfour` is the default session provider; disabling it keeps lower-level version,
   cache, download, and process management while removing session APIs.
 - **Observable.** Call `subscribe_output()` for a bounded, non-blocking subscription streaming `chromedriver`
-  stdout/stderr lines into your own logging or fixtures, or `recent_output()` for the last lines printed since spawn.
-  Startup failures carry that recent output in their error report.
+  stdout/stderr lines into your own logging or fixtures, `recent_output()` for the last lines printed since spawn, or
+  `subscribe_output_with_history()` for both without missing or duplicating a line. Startup failures carry that recent
+  output in their error report.
 
 ## Installation
 
@@ -51,7 +54,7 @@ tokio = { version = "1", features = ["full"] }
 
 ## Example
 
-```rust,no_run
+```rust
 use assertr::prelude::*;
 use chrome_for_testing_manager::ChromeForTesting;
 use rootcause::Report;
@@ -103,8 +106,8 @@ Cancellation is opt-in: pass a `CancellationToken` (re-exported from `tokio-util
 `.cancellation(...)` setter or `SessionBuilder::with_cancellation(...)`. Cancelled work rolls back cooperatively
 (process startup is terminated, an in-flight cache transaction removes its staging, a session callback is dropped and
 the session closed) and is reported as `ChromeForTestingError::Cancelled` after cleanup has been drained. What
-happens when a future is dropped instead is documented in the crate-level "Cancellation and drop safety" section of
-the API docs. Use `ChromeForTesting::shutdown().await` when graceful shutdown and its result matter.
+happens when a future is dropped instead is documented in "Cancellation and drop safety" below. Use
+`ChromeForTesting::shutdown().await` when graceful shutdown and its result matter.
 
 ## Configuration
 
@@ -113,7 +116,7 @@ a specific `Version`, or a `VersionRequest`. Shared process and session behavior
 technical driver settings are grouped in `ChromeDriverConfig`, whose `port` setter accepts a `u16`, a `Port`, or a
 `PortRequest`. Passing `0u16` requests an OS-assigned port.
 
-```rust,no_run
+```rust
 use chrome_for_testing_manager::{
     Channel, ChromeDriverConfig, ChromeForTesting, ChromeForTestingConfig,
     DriverOutputSubscriptionError, GracefulShutdown, LifecyclePolicy, NetworkPolicy,
@@ -196,8 +199,8 @@ Resolution takes a non-empty `BrowserArtifactRequest`, so `Latest` is selected o
 installs and returns only the `LoadedBrowserPackage` for one specific binary. Each returned `LoadedBrowserPackage` records the selected
 binary and both paths while privately retaining a cache lease.
 `launch_driver` consumes a `ChromeDriverConfig` and returns `ChromeDriverProcess`, which exposes `port()`, a bounded
-non-blocking `subscribe_output()`, `recent_output()`, and consuming `terminate()` without exposing the generic process
-implementation.
+non-blocking `subscribe_output()`, `recent_output()`, `subscribe_output_with_history()`, and consuming `terminate()`
+without exposing the generic process implementation.
 
 Installations are cross-process coordinated through typed shared-cache and exclusive-artifact lock guards. Each
 artifact is downloaded and validated in a unique same-filesystem staging directory, marked with the executable size,
@@ -205,6 +208,36 @@ and atomically renamed into place. Loaded packages and launched driver processes
 cache lease, so `clear_cache()` and `prune_cache(...)` return the typed `CacheInUse` error instead of deleting active
 artifacts. `prune_cache(...)` removes unretained version directories while preserving the lock namespace and unknown
 owner files.
+
+The cache contents live in a layout-versioned directory beneath the cache root, so releases with incompatible on-disk
+layouts can share one cache root without replacing each other's packages. Releases before 0.13 stored versions
+directly in the cache root. Neither `clear_cache()` nor `prune_cache(...)` touches those, so delete them manually once
+no older release uses them.
+
+## Cancellation and drop safety
+
+Cancellation is opt-in. Pass a `CancellationToken` through `ChromeForTestingConfig::builder`,
+the session builder's `with_cancellation` step (feature `thirtyfour`), or the lower-level
+`ChromeForTestingManager` methods to cancel work cooperatively. Cancelled work is rolled back
+before `ChromeForTestingError::Cancelled` is returned: an in-flight installation stops and
+removes its staging directory, a starting process is terminated, and a `WebDriver` handshake in
+flight is completed and the new session closed.
+
+Dropping a future instead of cancelling it is handled as well, but less observably:
+
+- An installation is cancelled and rolls back in the background: its extraction stops at the next
+  chunk, and its staging directory is removed before its cache locks are released.
+- A process that is starting up, and every managed process when its handle is dropped, is
+  terminated synchronously, briefly blocking a runtime worker.
+- A `WebDriver` session run hands its cleanup (quitting the session, terminating a Chrome Headless
+  Shell) to the Tokio runtime, and `ChromeForTesting::shutdown` waits for it. A session whose
+  handshake was cut off cannot be closed; `ChromeDriver` ends it when it terminates.
+
+None of this survives the Tokio runtime shutting down or the process being killed. Prefer explicit
+cancellation followed by awaiting the operation, and call `ChromeForTesting::shutdown` for
+observable graceful shutdown.
+
+<!-- cargo-rdme end -->
 
 ## MSRV
 

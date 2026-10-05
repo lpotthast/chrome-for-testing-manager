@@ -27,6 +27,11 @@ pub(crate) struct HeadlessShellSession {
 }
 
 impl HeadlessShellSession {
+    /// The shell's recent output, formatted as a report attachment, or `None` if there is none.
+    pub(crate) fn formatted_recent_output(&self) -> Option<String> {
+        crate::process_support::format_output(&self.process.recent_output())
+    }
+
     pub(crate) async fn terminate(self) -> Result<ExitStatus> {
         let Self {
             process,
@@ -137,7 +142,7 @@ fn launch_args(caps: &thirtyfour::ChromeCapabilities) -> Result<Vec<String>> {
     validate_capabilities(caps)?;
     let mut launch_args = Vec::new();
     let mut remote_debugging_port_arg = None::<String>;
-    for arg in caps.args() {
+    for arg in caps.args().into_iter().map(normalize_arg) {
         match classify_remote_debugging_arg(&arg) {
             Some(RemoteDebuggingArg::Invalid) => {
                 bail!(ChromeForTestingError::InvalidHeadlessShellRemoteDebuggingArg { arg });
@@ -159,6 +164,16 @@ fn launch_args(caps: &thirtyfour::ChromeCapabilities) -> Result<Vec<String>> {
     launch_args
         .push(remote_debugging_port_arg.unwrap_or_else(|| DEFAULT_REMOTE_DEBUGGING_ARG.to_owned()));
     Ok(launch_args)
+}
+
+/// Prefix a switch given without its leading `--` (e.g. `user-agent=x`), like `ChromeDriver` does
+/// for the Chrome it launches itself. Passed unchanged, the shell would open it as a URL instead.
+fn normalize_arg(arg: String) -> String {
+    if arg.starts_with("--") {
+        arg
+    } else {
+        format!("--{arg}")
+    }
 }
 
 /// Reject `goog:chromeOptions` other than `args`, which `ChromeDriver` cannot apply when attaching
@@ -224,6 +239,26 @@ mod tests {
         caps.add_arg("--headless=new")?;
         assert_that!(launch_args(&caps)?)
             .is_equal_to(["--headless=new", DEFAULT_REMOTE_DEBUGGING_ARG]);
+        Ok(())
+    }
+
+    #[test]
+    fn launch_args_normalize_switches_without_leading_dashes() -> Result<(), rootcause::Report> {
+        let mut caps = thirtyfour::ChromeCapabilities::new();
+        caps.add_arg("user-agent=probe-agent")?;
+        caps.add_arg("remote-debugging-port=9222")?;
+        assert_that!(launch_args(&caps)?)
+            .is_equal_to(["--user-agent=probe-agent", "--remote-debugging-port=9222"]);
+
+        let mut caps = thirtyfour::ChromeCapabilities::new();
+        caps.add_arg("remote-debugging-pipe")?;
+        let error = launch_args(&caps).expect_err("a dashless pipe switch must be rejected too");
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::InvalidHeadlessShellRemoteDebuggingArg { arg }
+                if arg == "--remote-debugging-pipe"
+        ))
+        .is_true();
         Ok(())
     }
 

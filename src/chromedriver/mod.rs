@@ -7,4 +7,4 @@ mod config;
 pub(crate) mod output;
 pub(crate) mod process;
 
-pub use config::ChromeDriverConfig;
+pub use config::{ChromeDriverConfig, ChromeDriverLogLevel};

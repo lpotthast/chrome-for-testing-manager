@@ -223,11 +223,12 @@ fn safe_output_path<R: Read>(
     }
 }
 
-/// Keep only the regular permission bits (no setuid, setgid, or sticky bit) and always leave the
-/// owner able to read and write, so that staging and cache cleanup can remove the entry.
+/// Keep only the regular permission bits without group and other write access (no setuid,
+/// setgid, or sticky bit), and always leave the owner able to read and write, so that staging and
+/// cache cleanup can remove the entry. Nobody but the owner may replace a cached executable.
 const fn sanitize_mode(mode: u32, is_dir: bool) -> u32 {
     let owner = if is_dir { 0o700 } else { 0o600 };
-    (mode & 0o777) | owner
+    (mode & 0o755) | owner
 }
 
 fn create_package_symlink(
@@ -573,6 +574,11 @@ mod tests {
                 SimpleFileOptions::default().unix_permissions(0o4755),
             )?;
             writer.write_all(b"binary")?;
+            writer.start_file(
+                "bundle/world-writable",
+                SimpleFileOptions::default().unix_permissions(0o777),
+            )?;
+            writer.write_all(b"binary")?;
             Ok(())
         })?;
 
@@ -583,6 +589,7 @@ mod tests {
         };
         assert_that!(mode("bundle/read-only")?).is_equal_to(0o755);
         assert_that!(mode("bundle/read-only/setuid")?).is_equal_to(0o755);
+        assert_that!(mode("bundle/world-writable")?).is_equal_to(0o755);
         Ok(())
     }
 

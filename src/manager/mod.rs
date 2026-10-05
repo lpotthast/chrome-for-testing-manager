@@ -35,6 +35,9 @@ pub struct ChromeForTestingManager {
     /// No-proxy client for `WebDriver` sessions, bounded by the `WebDriver` request deadline.
     #[cfg(feature = "thirtyfour")]
     webdriver_client: reqwest::Client,
+    /// Cleanups of session runs whose future was dropped, shared by all clones.
+    #[cfg(feature = "thirtyfour")]
+    session_cleanups: tokio_util::task::TaskTracker,
     lifecycle: LifecyclePolicy,
     platform: Platform,
 }
@@ -119,15 +122,20 @@ impl ChromeForTestingManager {
             local_client,
             #[cfg(feature = "thirtyfour")]
             webdriver_client,
+            #[cfg(feature = "thirtyfour")]
+            session_cleanups: tokio_util::task::TaskTracker::new(),
             lifecycle,
             platform,
         })
     }
 
     /// Return the cache root used by this manager.
+    ///
+    /// The cache contents live in a layout-versioned directory beneath it, so releases of this
+    /// crate with incompatible on-disk layouts can share one cache root without interfering.
     #[must_use]
     pub fn cache_dir(&self) -> &Path {
-        self.artifact_store.cache_dir().path()
+        self.artifact_store.cache_dir().root()
     }
 
     /// Return the platform whose artifacts this manager resolves and installs.
@@ -138,7 +146,9 @@ impl ChromeForTestingManager {
 
     /// Remove every cached version when no download or loaded package holds a cache lease.
     ///
-    /// Unrecognized root entries and the lock namespace are left untouched. This operation does
+    /// Unrecognized entries and the lock namespace are left untouched, and so are version
+    /// directories that releases before 0.13 stored directly in the cache root; delete those
+    /// manually once no older release uses them. This operation does
     /// not wait for users of the cache: after a brief retry (about 100 ms) covering lock
     /// handover, it returns [`ChromeForTestingError::CacheInUse`].
     ///
@@ -152,7 +162,8 @@ impl ChromeForTestingManager {
     /// Remove cached version directories except for the explicitly retained versions.
     ///
     /// Like [`Self::clear_cache`], pruning is rejected while any loaded package or installation
-    /// owns a cache lease. Unrecognized root entries and the lock namespace are left untouched.
+    /// owns a cache lease, and leaves unrecognized entries, the lock namespace, and pre-0.13
+    /// version directories untouched.
     ///
     /// # Errors
     ///
@@ -188,8 +199,8 @@ impl ChromeForTestingManager {
     ///
     /// Concurrent artifact transactions are drained on every outcome, and cancellation waits for
     /// extraction and staging cleanup before returning. Dropping the returned future cancels the
-    /// installation as well: an in-flight extraction stops at its next chunk, and its staging
-    /// directory is removed by the next installation of that artifact.
+    /// installation as well, which then rolls back in the background; see the
+    /// [crate-level cancellation section](crate#cancellation-and-drop-safety).
     ///
     /// # Errors
     ///
@@ -309,6 +320,12 @@ impl ChromeForTestingManager {
     #[cfg(feature = "thirtyfour")]
     pub(crate) const fn lifecycle(&self) -> &LifecyclePolicy {
         &self.lifecycle
+    }
+
+    /// Tracks the background cleanups of dropped session runs.
+    #[cfg(feature = "thirtyfour")]
+    pub(crate) const fn session_cleanups(&self) -> &tokio_util::task::TaskTracker {
+        &self.session_cleanups
     }
 
     #[cfg(test)]
@@ -601,7 +618,10 @@ mod tests {
         let packages = manager
             .download(&selected, CancellationToken::new())
             .await?;
-        let marker = package_marker(packages[0].browser_executable(), manager.cache_dir());
+        let marker = package_marker(
+            packages[0].browser_executable(),
+            manager.artifact_store.cache_dir().path(),
+        );
         drop(packages);
         tokio::fs::write(&marker, "invalid marker").await?;
 
@@ -744,7 +764,9 @@ mod tests {
             .next()
             .expect("platform executable path has a package root");
         let platform_dir = manager
+            .artifact_store
             .cache_dir()
+            .path()
             .join(version.to_string())
             .join(manager.platform.to_string());
         tokio::time::timeout(Duration::from_secs(5), async {

@@ -43,7 +43,7 @@ pub struct DriverOutputLine {
     /// The output stream this line came from.
     pub source: DriverOutputSource,
 
-    /// The parsed output line without its trailing newline character.
+    /// The parsed output line without its line terminator (`\n` or `\r\n`).
     pub line: String,
 }
 
@@ -177,6 +177,22 @@ impl OutputCapture {
         DriverOutputSubscription { receiver }
     }
 
+    /// Return the recent output together with a subscription to every later line.
+    ///
+    /// Lines are recorded and published under the history lock, which is held here while taking
+    /// the snapshot and subscribing, so every line is either in the snapshot or delivered to the
+    /// subscription, never both.
+    pub(crate) fn subscribe_with_history(
+        &self,
+    ) -> (Vec<DriverOutputLine>, DriverOutputSubscription) {
+        let history = self
+            .history
+            .lock()
+            .expect("output history mutex is not poisoned");
+        let subscription = self.subscribe();
+        (history.iter().cloned().collect(), subscription)
+    }
+
     /// Return up to the last [`OUTPUT_HISTORY_LINES`] lines, oldest first.
     pub(crate) fn recent_output(&self) -> Vec<DriverOutputLine> {
         self.history
@@ -232,18 +248,17 @@ impl OutputCapture {
             .consume(ParseLines::inspect(
                 LineParsingOptions::default(),
                 move |line| {
-                    let line_ref: &str = &line;
+                    // Line parsing splits at `\n` only, which leaves the `\r` of `\r\n`.
+                    let line_ref: &str = line.strip_suffix('\r').unwrap_or(&line);
                     tracing::debug!(process = name, source = ?source, output = line_ref, "process output");
 
-                    let line = DriverOutputLine::new(source, line.into_owned());
-                    {
-                        let mut history =
-                            history.lock().expect("output history mutex is not poisoned");
-                        if history.len() == OUTPUT_HISTORY_LINES {
-                            history.pop_front();
-                        }
-                        history.push_back(line.clone());
+                    let line = DriverOutputLine::new(source, line_ref);
+                    // Publish under the history lock; see `subscribe_with_history`.
+                    let mut history = history.lock().expect("output history mutex is not poisoned");
+                    if history.len() == OUTPUT_HISTORY_LINES {
+                        history.pop_front();
                     }
+                    history.push_back(line.clone());
                     let _ = sender.send(line);
 
                     Next::Continue

@@ -32,7 +32,13 @@ see "Changed" and "Removed" for migration notes.
   recoverable `DriverOutputSubscriptionError::Lagged`; `Closed` is reported once the driver's output ends, including
   when the driver exits on its own.
 - `recent_output()` returns the last 256 driver output lines since spawn. Startup errors of `ChromeDriver` and Chrome
-  Headless Shell carry their recent output as a report attachment.
+  Headless Shell carry their recent output as a report attachment, as do failed attachments to a Chrome Headless Shell.
+- `subscribe_output_with_history()` on `ChromeForTesting` and `ChromeDriverProcess` returns the recent output together
+  with a subscription, without missing or duplicating a line in between.
+- `ChromeDriverConfig::log_level` with `ChromeDriverLogLevel` (default `Info`) to configure `ChromeDriver`'s own log
+  verbosity.
+- `Port` implements `Hash`, `PartialOrd`, `Ord`, `From<NonZeroU16>`, and `TryFrom<u16>`, and `u16` implements
+  `From<Port>`.
 - `DriverOutputLine::new` and a `Display` implementation for `DriverOutputLine`.
 - `BrowserArtifactRequest` for artifact-aware version resolution, `ChromeForTestingManager::download_for` to install a
   single browser package, `ChromeForTestingManager::prune_cache` with `CachePruneResult`, and
@@ -66,7 +72,8 @@ see "Changed" and "Removed" for migration notes.
   `chromedriver_executable()`) instead of an enum over `LoadedChromePackage` / `LoadedChromeHeadlessShellPackage`. It
   holds a shared cache lease, so the cache cannot be cleared or pruned while it is in use.
 - **Breaking:** `Port` is backed by `NonZeroU16`. `Port::new(0)` now panics; use `Port::try_new` for unchecked values,
-  or pass `0u16` where `Into<PortRequest>` is accepted, which now means `PortRequest::Any`.
+  or pass `0u16` where `Into<PortRequest>` is accepted, which now means `PortRequest::Any`. `PortRequest` is
+  `#[non_exhaustive]`.
 - Deprecated `SelectedVersion::has_chromedriver_download`: it is always `true` now.
 - **Breaking:** `SessionBuilder` no longer has type-state parameters. `with_caps` / `with_config` accept closures
   borrowing from the caller (`Send + 'a`), and repeated calls compose in order instead of replacing earlier ones.
@@ -74,18 +81,25 @@ see "Changed" and "Removed" for migration notes.
   `#[non_exhaustive]` and lost its `sequence` field; construct it with `DriverOutputLine::new`.
 - Artifact installation is an atomic cross-process transaction: a shared cache lease plus a per-artifact lock, unique
   staging directories, a completion marker recording the executable size, and an atomic rename into place. Cache hits
-  are validated through the marker and the executable size, without taking the lock. Packages installed by earlier
-  versions are reinstalled once. Interrupted installations and removals never leave a partial package behind.
+  are validated through the marker and the executable size, without taking the lock. Interrupted installations and
+  removals never leave a partial package behind. A dropped installation future rolls back in the background and keeps
+  its locks until its file-system work has stopped. The downloaded archive is deleted right after extraction.
+- **Breaking:** Cached artifacts live in a layout-versioned directory (`v1`) beneath the cache root, so releases with
+  different on-disk layouts never replace each other's packages, even while in use. Version directories that earlier
+  releases stored directly in the cache root are neither reused nor removed by `clear_cache` / `prune_cache`; delete
+  them manually once no older release uses them.
 - ZIP extraction runs on a hardened, cancellable extractor instead of `zip`'s built-in one. Files are written before
   any symlink exists, every symlink is validated by real resolution to stay inside the published package, and
-  dangling or over-long symlinks are rejected. Archive permissions lose setuid, setgid, and sticky bits, and owners keep
-  write access.
+  dangling or over-long symlinks are rejected. Archive permissions lose setuid, setgid, and sticky bits as well as group
+  and other write access, and owners keep write access.
 - `ChromeDriver` startup requires the spawned process's own startup line and a ready `/status`, all within the
   configured startup deadline. Fixed ports are checked against the port the driver reports.
 - Chrome Headless Shell sessions reject capability options that `ChromeDriver` cannot apply when attaching to a running
   shell, and the shell's whole startup, including its initial page, is bounded by the Headless Shell startup deadline.
-- Failed graceful termination escalates to a kill. If even that fails, the error is returned instead of panicking
-  when the handle is dropped.
+  Browser arguments given without their leading `--` (e.g. `user-agent=...`) are normalized as `ChromeDriver` does
+  for regular Chrome, instead of being opened as URLs.
+- Failed graceful termination escalates to a kill. If even that fails, or the killed process does not exit within 5 s,
+  the error is returned instead of blocking forever, retrying termination, or panicking when the handle is dropped.
 - Managed `WebDriver` sessions connect to `127.0.0.1` through a no-proxy HTTP client, so `HTTP_PROXY` no longer breaks
   them. Its request deadline is `NetworkPolicy::webdriver_request_timeout` (default 120 s);
   `WebDriverBuilder::request_timeout` inside `with_config` has no effect on it. Replace the client through
@@ -95,15 +109,24 @@ see "Changed" and "Removed" for migration notes.
   retry, and a Chrome Headless Shell is terminated regardless.
 - A Chrome Headless Shell is terminated gracefully whenever its session run ends, including on failure, cancellation,
   a panic in a `with_config` closure, or a dropped session future.
+- A session callback that panics before returning its future is caught like any other callback panic, so its cleanup
+  is awaited instead of handed to the runtime.
+- `ChromeForTesting::shutdown` waits for the background cleanup of dropped session runs before terminating
+  `ChromeDriver`.
+- Driver output lines no longer keep the `\r` of a `\r\n` line terminator.
 - `clear_cache` only removes cached version directories and the crate's own leftovers, keeping unrelated files in a
   custom cache directory. `clear_cache` and `prune_cache` also remove the lock files of removed versions. Removals
-  rename a directory to a trash entry first, so an interrupted removal never leaves a partial package behind.
+  rename a directory to a trash entry first, so an interrupted removal never leaves a partial package behind. A
+  leftover that cannot be removed no longer makes every later `clear_cache` / `prune_cache` fail. On Windows, renames
+  and removals are retried briefly while a virus scanner or indexer holds a file open.
 - A transient I/O error while validating an installed package no longer causes the package, possibly in use, to be
   replaced, and leftover staging directories that cannot be removed no longer block installation. A file or directory
   standing where a package or its completion marker belongs is repaired by reinstalling the package.
 - `download_for` installs only the requested browser and `ChromeDriver`, even if the selected version resolved both
   browsers.
 - `futures` is only a dependency with the `thirtyfour` feature.
+- The crate-level documentation is the README content regardless of the enabled features; the README is generated
+  from it with `cargo-rdme`.
 - Updated `tokio-process-tools` to 0.11.2.
 
 ### Removed

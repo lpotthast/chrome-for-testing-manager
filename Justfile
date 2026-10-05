@@ -8,6 +8,7 @@ install-tools:
     cargo +stable install cargo-hack --locked
     cargo +stable install cargo-minimal-versions --locked
     cargo +stable install cargo-msrv --locked
+    cargo +stable install cargo-rdme --locked
 
 # Check if the current dependency version bounds are sufficient.
 minimal-versions:
@@ -20,6 +21,10 @@ msrv:
 # Lint the code.
 clippy:
     cargo clippy --all --all-features -- -W clippy::pedantic
+
+# Regenerate the README body from the crate-level docs in `src/lib.rs`.
+readme:
+    cargo rdme --force
 
 # Update all deps; sort all Cargo.toml deps; format all code.
 tidy:
@@ -38,3 +43,4 @@ verify:
     cargo test --doc --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
+    cargo rdme --check

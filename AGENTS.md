@@ -13,7 +13,9 @@ Cross-cutting policies, errors, ports, and the shared guarded-process type (`src
 root modules.
 
 Integration tests live in `tests/`, with reusable browser flows under `tests/common/`. Public documentation belongs in
-`README.md`; release notes belong in `CHANGELOG.md`.
+the crate-level docs of `src/lib.rs`, from which `just readme` (cargo-rdme) generates the body of `README.md`; edit
+only the README parts outside the `cargo-rdme` markers directly. Gate examples needing the `thirtyfour` feature with
+hidden `# #[cfg(feature = "thirtyfour")]` lines. Release notes belong in `CHANGELOG.md`.
 
 ## Architecture & Feature Boundaries
 
@@ -31,6 +33,7 @@ cache behavior when changing downloads or process lifecycles.
 - `cargo doc --no-deps --all-features`: build API documentation.
 - `just verify`: run the full non-mutating validation pipeline.
 - `just tidy`: update dependencies, sort manifests, and format files; expect maintained files to change.
+- `just readme`: regenerate the README body from the crate-level docs.
 
 ## Coding Style & Naming Conventions
 

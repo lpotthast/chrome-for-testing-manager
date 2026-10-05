@@ -1,7 +1,45 @@
 //! Technical configuration for launching a managed `ChromeDriver` process.
 
 use crate::port::PortRequest;
+use chrome_for_testing::chromedriver::LogLevel;
 use typed_builder::TypedBuilder;
+
+/// Verbosity of the managed `ChromeDriver` process's own log output.
+///
+/// The log is part of the driver output observed through
+/// [`crate::ChromeForTesting::subscribe_output`] and attached to startup errors. Disabling it
+/// entirely is not offered, because `ChromeDriver` then no longer reports the port it listens on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChromeDriverLogLevel {
+    /// Log all messages.
+    All,
+
+    /// Log debug messages and above.
+    Debug,
+
+    /// Log info messages and above, including every `WebDriver` command and response.
+    #[default]
+    Info,
+
+    /// Log warnings and above.
+    Warning,
+
+    /// Log severe errors only.
+    Severe,
+}
+
+impl ChromeDriverLogLevel {
+    const fn as_log_level(self) -> LogLevel {
+        match self {
+            Self::All => LogLevel::All,
+            Self::Debug => LogLevel::Debug,
+            Self::Info => LogLevel::Info,
+            Self::Warning => LogLevel::Warning,
+            Self::Severe => LogLevel::Severe,
+        }
+    }
+}
 
 /// Configuration for the managed `ChromeDriver` process.
 ///
@@ -20,6 +58,10 @@ pub struct ChromeDriverConfig {
     /// Accepts anything implementing `Into<PortRequest>`, including a bare `u16` and [`crate::Port`].
     #[builder(default = PortRequest::Any, setter(into))]
     port: PortRequest,
+
+    /// The verbosity of `ChromeDriver`'s log output.
+    #[builder(default)]
+    log_level: ChromeDriverLogLevel,
 }
 
 impl Default for ChromeDriverConfig {
@@ -31,6 +73,10 @@ impl Default for ChromeDriverConfig {
 impl ChromeDriverConfig {
     pub(crate) const fn port(&self) -> PortRequest {
         self.port
+    }
+
+    pub(crate) const fn log_level(&self) -> LogLevel {
+        self.log_level.as_log_level()
     }
 }
 

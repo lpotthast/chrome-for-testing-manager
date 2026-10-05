@@ -87,7 +87,10 @@ pub struct LifecyclePolicy {
     #[builder(default = Duration::from_secs(10))]
     headless_shell_startup_timeout: Duration,
 
-    /// Independent upper bound for `WebDriver` and browser cleanup.
+    /// Upper bound for quitting a `WebDriver` session during cleanup.
+    ///
+    /// A session that cannot be quit in time is abandoned. Terminating a Chrome Headless Shell
+    /// afterwards is bounded by the `graceful_shutdown` policy instead.
     #[cfg_attr(
         not(feature = "thirtyfour"),
         expect(dead_code, reason = "session-only setting")
@@ -122,7 +125,7 @@ impl LifecyclePolicy {
         self.headless_shell_startup_timeout
     }
 
-    /// Return the independent session-cleanup deadline.
+    /// Return the deadline for quitting a `WebDriver` session during cleanup.
     #[cfg_attr(
         not(feature = "thirtyfour"),
         expect(dead_code, reason = "session-only setting")

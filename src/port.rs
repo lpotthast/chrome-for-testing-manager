@@ -1,10 +1,10 @@
 //! Validated port values and fixed-or-OS-assigned port requests.
 
 use std::fmt::{Display, Formatter};
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, TryFromIntError};
 
 /// A nonzero TCP port bound (or to be bound) by a process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port(NonZeroU16);
 
 impl Port {
@@ -38,6 +38,27 @@ impl Port {
     }
 }
 
+impl From<NonZeroU16> for Port {
+    fn from(value: NonZeroU16) -> Self {
+        Self(value)
+    }
+}
+
+impl TryFrom<u16> for Port {
+    type Error = TryFromIntError;
+
+    /// Create a typed port, failing when `value` is zero.
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        NonZeroU16::try_from(value).map(Self)
+    }
+}
+
+impl From<Port> for u16 {
+    fn from(port: Port) -> Self {
+        port.as_u16()
+    }
+}
+
 impl Display for Port {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -45,7 +66,8 @@ impl Display for Port {
 }
 
 /// How a process should pick the port it listens on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PortRequest {
     /// Let the OS assign an unused port.
     Any,
@@ -85,6 +107,13 @@ mod tests {
     #[test]
     fn try_new_rejects_zero() {
         assert_that!(Port::try_new(0)).is_none();
+    }
+
+    #[test]
+    fn try_from_u16_rejects_zero() {
+        assert_that!(Port::try_from(0u16).is_err()).is_true();
+        assert_that!(Port::try_from(8080u16).ok()).is_equal_to(Some(Port::new(8080)));
+        assert_that!(u16::from(Port::new(8080))).is_equal_to(8080);
     }
 
     #[test]

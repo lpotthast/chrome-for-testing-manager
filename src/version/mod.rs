@@ -23,6 +23,11 @@ pub enum VersionRequest {
 
     /// Use the latest release from the given [`Channel`],
     /// e.g. the one from the [`Channel::Stable`] channel.
+    ///
+    /// Only the channel's current release is considered. If it lacks a requested artifact (for
+    /// example Chrome Headless Shell) on the target platform, resolution fails with
+    /// [`crate::ChromeForTestingError::NoMatchingVersion`] instead of falling back to an older
+    /// release.
     LatestIn(Channel),
 
     /// Pin a specific version to use.

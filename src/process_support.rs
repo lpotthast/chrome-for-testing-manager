@@ -7,24 +7,27 @@
 //! or startup failure. Startup errors carry the process's recent output.
 //!
 //! Termination never leaves an armed drop guard behind: if graceful termination fails, the process
-//! is killed, and if that fails too, the failure is accepted and reported instead of panicking when
-//! the handle is dropped. Output is drained before the handle is dropped, because dropping it
-//! aborts the readers of its output pipes.
+//! is killed, and if that fails too (or the killed process does not exit in time), the failure is
+//! accepted and reported instead of retrying termination or panicking when the handle is dropped.
+//! Output is drained before the handle is dropped, because dropping it aborts the readers of its
+//! output pipes.
 
 use crate::chromedriver::output::{DriverOutputLine, DriverOutputSubscription, OutputCapture};
 use crate::error::{attach_child, operation_result_with_cleanup};
 use crate::{CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, Result};
 use rootcause::{Report, bail, prelude::ResultExt, report};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::runtime::RuntimeFlavor;
 use tokio::time::Instant;
 use tokio_process_tools::{
     BroadcastOutputStream, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_READ_CHUNK_SIZE, GracefulShutdown,
-    LineParsingOptions, NumBytesExt, Process, ReliableWithBackpressure, ReplayEnabled,
-    RunningState, TerminateOnDrop, WaitForLineResult,
+    LineParsingOptions, NumBytesExt, Process, ProcessHandle, ReliableWithBackpressure,
+    ReplayEnabled, RunningState, WaitForLineResult,
 };
 
 /// How long to wait for the exit of a process that closed its startup output.
@@ -33,8 +36,81 @@ const EXIT_OBSERVATION_GRACE: Duration = Duration::from_millis(500);
 /// How long to wait for the output consumers of an exited process to process its final lines.
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub(crate) type ManagedProcessHandle =
-    TerminateOnDrop<BroadcastOutputStream<ReliableWithBackpressure, ReplayEnabled>>;
+/// How long to wait for a killed process to exit. A process stuck in uninterruptible I/O may
+/// never exit; it is then abandoned instead of blocking shutdown forever.
+const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+
+type ManagedOutputStream = BroadcastOutputStream<ReliableWithBackpressure, ReplayEnabled>;
+
+/// A process handle that terminates its process when dropped.
+///
+/// Like `tokio_process_tools::TerminateOnDrop`, but disarmable: once termination failed and that
+/// failure was accepted, dropping the handle must not block a runtime worker on yet another
+/// termination attempt. Dropping an armed handle requires an active multithreaded Tokio runtime
+/// and panics otherwise, as does a failed termination during drop.
+#[derive(Debug)]
+pub(crate) struct ManagedProcessHandle {
+    inner: ProcessHandle<ManagedOutputStream>,
+    name: &'static str,
+    shutdown: GracefulShutdown,
+    terminate_on_drop: bool,
+}
+
+impl ManagedProcessHandle {
+    /// Accept that the process may still be running: dropping the handle neither retries
+    /// termination nor panics.
+    fn disarm(&mut self) {
+        self.terminate_on_drop = false;
+        self.inner.must_not_be_terminated();
+    }
+}
+
+impl Deref for ManagedProcessHandle {
+    type Target = ProcessHandle<ManagedOutputStream>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for ManagedProcessHandle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for ManagedProcessHandle {
+    fn drop(&mut self) {
+        // Panicking again while unwinding would abort; the inner handle's own guard still sends
+        // a kill signal when it drops.
+        if !self.terminate_on_drop || std::thread::panicking() {
+            return;
+        }
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if runtime.runtime_flavor() == RuntimeFlavor::MultiThread => runtime,
+            _ => panic!(
+                "the {} process handle was dropped outside of an active multi-threaded Tokio \
+                 runtime, which is required to terminate the process",
+                self.name
+            ),
+        };
+        tokio::task::block_in_place(|| {
+            runtime.block_on(async {
+                if let RunningState::Terminated(_) = self.inner.is_running() {
+                    self.inner.must_not_be_terminated();
+                    return;
+                }
+                if let Err(error) = self.inner.terminate(self.shutdown.clone()).await {
+                    tracing::error!(
+                        process = self.name,
+                        %error,
+                        "failed to terminate process while dropping its handle"
+                    );
+                }
+            });
+        });
+    }
+}
 
 /// The output stream carrying a process's startup line.
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +154,7 @@ impl ManagedProcess {
         command: Command,
         shutdown: GracefulShutdown,
     ) -> Result<Self> {
-        let handle = Process::new(command)
+        let inner = Process::new(command)
             .name(name)
             .stdout_and_stderr(|stream| {
                 // Replay covers the gap between spawn and the subscriptions below; it is sealed
@@ -94,8 +170,13 @@ impl ManagedProcess {
             .context(ChromeForTestingError::SpawnProcess {
                 artifact,
                 path: executable.to_owned(),
-            })?
-            .terminate_on_drop(shutdown.clone());
+            })?;
+        let handle = ManagedProcessHandle {
+            inner,
+            name,
+            shutdown: shutdown.clone(),
+            terminate_on_drop: true,
+        };
         let output = OutputCapture::start(&handle, name);
         Ok(Self {
             handle,
@@ -113,6 +194,12 @@ impl ManagedProcess {
 
     pub(crate) fn recent_output(&self) -> Vec<DriverOutputLine> {
         self.output.recent_output()
+    }
+
+    pub(crate) fn subscribe_output_with_history(
+        &self,
+    ) -> (Vec<DriverOutputLine>, DriverOutputSubscription) {
+        self.output.subscribe_with_history()
     }
 
     /// Drive `startup` while giving cancellation deterministic precedence.
@@ -191,18 +278,30 @@ impl ManagedProcess {
                 path: executable.to_owned(),
             },
         );
-        match handle.kill().await {
-            Ok(()) => {
+        match tokio::time::timeout(KILL_TIMEOUT, handle.kill()).await {
+            Ok(Ok(())) => {
                 error = error.attach("the process was killed after graceful termination failed");
             }
-            Err(kill_error) => {
-                handle.must_not_be_terminated();
+            Ok(Err(kill_error)) => {
+                handle.disarm();
                 tracing::error!(
                     process = name,
                     error = %kill_error,
                     "failed to kill process after graceful termination failed; it may still be running"
                 );
                 attach_child(&mut error, Report::new_sendsync(kill_error));
+            }
+            Err(_) => {
+                handle.disarm();
+                tracing::error!(
+                    process = name,
+                    timeout = ?KILL_TIMEOUT,
+                    "killed process did not exit in time; it may still be running"
+                );
+                error = error.attach(format!(
+                    "the process was killed after graceful termination failed, but did not exit \
+                     within {KILL_TIMEOUT:?}; it may still be running"
+                ));
             }
         }
         Err(error)
@@ -315,7 +414,7 @@ impl ManagedProcess {
 }
 
 /// Render output lines as a report attachment, or `None` if there are none.
-fn format_output(lines: &[DriverOutputLine]) -> Option<String> {
+pub(crate) fn format_output(lines: &[DriverOutputLine]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }

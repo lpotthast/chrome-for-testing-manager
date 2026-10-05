@@ -18,6 +18,7 @@ cargo test --all --all-features                            # Run all tests (unit
 cargo test <test_name> --all-features                      # Run a single test by name
 just verify                                                # fmt-check, check, clippy (pedantic, -D warnings), test, doc
 just tidy                                                  # Update deps, sort Cargo.toml, format
+just readme                                                # Regenerate README body from `src/lib.rs` docs (cargo-rdme)
 just install-tools                                         # One-time: nightly + cargo-hack/-minimal-versions/-msrv
 just minimal-versions                                      # Verify minimum dependency version bounds
 ```
@@ -69,9 +70,11 @@ Supporting modules: `artifact_store/` (download, hardened ZIP extraction, instal
 shared/exclusive file-lock guards, clear/prune), `chromedriver/` (config, guarded process, output fan-out),
 `session/` (builder, Headless Shell launch), `version/` (requests + resolver), `process_support` (`ManagedProcess`:
 guarded spawn, output capture, startup, and terminate-then-drain, shared by driver and Headless Shell), `policy.rs`
-(`NetworkPolicy`, `LifecyclePolicy`). Dropped futures are covered without background tasks: installs cancel through a
-drop guard on their token, processes terminate on drop, and a session run hands cleanup to the runtime from a drop
-guard.
+(`NetworkPolicy`, `LifecyclePolicy`). Dropped futures: installs cancel through a drop guard on their token and roll
+back in a task that owns the artifact lock and a cache lease, processes terminate on drop, and a session run hands
+cleanup to the runtime from a drop guard (tracked by the manager's `TaskTracker`, which `ChromeForTesting::shutdown`
+awaits). Cache contents live beneath a layout-versioned directory (`LAYOUT_DIR` in `cache/`); bump it instead of the
+completion-marker schema when the on-disk layout changes.
 
 Cancellation is opt-in and cooperative; the single authoritative description of the drop-safety guarantee lives in
 the crate-level docs section "Cancellation and drop safety" in `lib.rs` - link to it instead of restating it in

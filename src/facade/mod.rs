@@ -25,9 +25,9 @@ use std::process::ExitStatus;
 /// This handle owns the resolved browser package and its matching `ChromeDriver` process. Its
 /// process guard attempts termination when dropped inside an active multithreaded Tokio runtime;
 /// dropping it on a thread without one (for example after that runtime has shut down) panics
-/// instead of silently leaking the child process. Drop is only a fallback; call [`Self::shutdown`]
-/// to drive shutdown explicitly and surface any error. No drop guard can guarantee cleanup after
-/// abrupt process termination.
+/// instead of silently leaking the child process, as does a failed termination during drop. Drop
+/// is only a fallback; call [`Self::shutdown`] to drive shutdown explicitly and surface any error.
+/// No drop guard can guarantee cleanup after abrupt process termination.
 ///
 #[cfg_attr(
     feature = "thirtyfour",
@@ -187,18 +187,43 @@ impl ChromeForTesting {
 
     /// Return the most recent `ChromeDriver` output lines (up to 256, from spawn on), oldest
     /// first.
+    ///
+    /// Use [`Self::subscribe_output_with_history`] to combine history and subscription without
+    /// losing or duplicating lines printed in between.
     #[must_use]
     pub fn recent_output(&self) -> Vec<DriverOutputLine> {
         self.driver.recent_output()
     }
 
+    /// Return the most recent `ChromeDriver` output lines (up to 256, oldest first) together with
+    /// a subscription to every line printed afterwards.
+    ///
+    /// Every line is either part of the returned history or delivered to the subscription, never
+    /// both.
+    #[must_use]
+    pub fn subscribe_output_with_history(
+        &self,
+    ) -> (Vec<DriverOutputLine>, DriverOutputSubscription) {
+        self.driver.subscribe_output_with_history()
+    }
+
     /// Gracefully shut down the managed Chrome for Testing environment.
+    ///
+    /// Cleanups that dropped session runs handed to the runtime (quitting their sessions and
+    /// terminating their Chrome Headless Shells) are awaited first. Each of them is bounded by the
+    /// configured [`crate::LifecyclePolicy`].
     ///
     /// # Errors
     ///
     /// Returns the driver exit status, or an error if the environment cannot be shut down within
     /// the configured policy.
     pub async fn shutdown(self) -> Result<ExitStatus> {
+        #[cfg(feature = "thirtyfour")]
+        {
+            let session_cleanups = self.manager.session_cleanups();
+            session_cleanups.close();
+            session_cleanups.wait().await;
+        }
         self.driver.terminate().await
     }
 

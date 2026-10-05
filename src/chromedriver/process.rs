@@ -30,7 +30,8 @@ const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 ///
 /// The drop guard requires an active multithreaded Tokio runtime: dropping this value on a thread
 /// without one (for example after the runtime has shut down) panics instead of leaking the child
-/// process. Prefer [`Self::terminate`] for observable, error-reporting shutdown.
+/// process. Dropping it also panics, after sending a kill signal, when the process cannot be
+/// terminated. Prefer [`Self::terminate`] for observable, error-reporting shutdown.
 #[derive(Debug)]
 pub struct ChromeDriverProcess {
     process: ManagedProcess,
@@ -76,9 +77,25 @@ impl ChromeDriverProcess {
 
     /// Return the most recent `ChromeDriver` output lines (up to 256, from spawn on), oldest
     /// first.
+    ///
+    /// To combine it with [`Self::subscribe_output`], use
+    /// [`Self::subscribe_output_with_history`], which neither loses nor duplicates lines printed in
+    /// between.
     #[must_use]
     pub fn recent_output(&self) -> Vec<DriverOutputLine> {
         self.process.recent_output()
+    }
+
+    /// Return the most recent `ChromeDriver` output lines (up to 256, oldest first) together with
+    /// a subscription to every line printed afterwards.
+    ///
+    /// Every line is either part of the returned history or delivered to the subscription, never
+    /// both.
+    #[must_use]
+    pub fn subscribe_output_with_history(
+        &self,
+    ) -> (Vec<DriverOutputLine>, DriverOutputSubscription) {
+        self.process.subscribe_output_with_history()
     }
 
     pub(crate) async fn launch(
@@ -98,7 +115,7 @@ impl ChromeDriverProcess {
             "chromedriver",
             ChromeForTestingArtifact::ChromeDriver,
             executable,
-            Self::command(executable, requested_port),
+            Self::command(executable, &config),
             lifecycle.graceful_shutdown().clone(),
         )?;
         let startup_timeout = lifecycle.driver_startup_timeout();
@@ -135,15 +152,14 @@ impl ChromeDriverProcess {
         })
     }
 
-    fn command(executable: &Path, port: PortRequest) -> Command {
+    fn command(executable: &Path, config: &ChromeDriverConfig) -> Command {
         let mut command = Command::new(executable);
-        let requested_port = match port {
+        let requested_port = match config.port() {
             PortRequest::Any => 0,
             PortRequest::Specific(port) => port.as_u16(),
         };
         command.arg(format!("--port={requested_port}"));
-        let log_level = chrome_for_testing::chromedriver::LogLevel::Info;
-        command.arg(format!("--log-level={log_level}"));
+        command.arg(format!("--log-level={}", config.log_level()));
         command
     }
 
@@ -222,7 +238,8 @@ mod tests {
     use crate::test_support::write_executable;
     use crate::test_support::{FixtureServer, ResponseSpec, TestDirectory, cache_lease};
     use crate::{
-        CancellationToken, ChromeDriverConfig, ChromeForTestingError, GracefulShutdown, PortRequest,
+        CancellationToken, ChromeDriverConfig, ChromeDriverLogLevel, ChromeForTestingError,
+        GracefulShutdown,
     };
     use assertr::prelude::*;
     use std::collections::HashMap;
@@ -231,11 +248,28 @@ mod tests {
 
     #[test]
     fn random_port_is_encoded_explicitly() {
-        let command =
-            ChromeDriverProcess::command(std::path::Path::new("chromedriver"), PortRequest::Any);
+        let command = ChromeDriverProcess::command(
+            std::path::Path::new("chromedriver"),
+            &ChromeDriverConfig::default(),
+        );
         let args = command.as_std().get_args().collect::<Vec<_>>();
 
-        assert_that!(args.first().copied()).is_equal_to(Some(std::ffi::OsStr::new("--port=0")));
+        assert_that!(args).is_equal_to(vec![
+            std::ffi::OsStr::new("--port=0"),
+            std::ffi::OsStr::new("--log-level=INFO"),
+        ]);
+    }
+
+    #[test]
+    fn configured_log_level_is_passed_to_chromedriver() {
+        let config = ChromeDriverConfig::builder()
+            .log_level(ChromeDriverLogLevel::Warning)
+            .build();
+        let command = ChromeDriverProcess::command(std::path::Path::new("chromedriver"), &config);
+        let args = command.as_std().get_args().collect::<Vec<_>>();
+
+        assert_that!(args.last().copied())
+            .is_equal_to(Some(std::ffi::OsStr::new("--log-level=WARNING")));
     }
 
     #[cfg(unix)]
@@ -308,6 +342,55 @@ mod tests {
                 "the subscription must receive output emitted during graceful termination",
             )
             .is_true();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn history_and_subscription_split_output_without_overlap() -> Result<(), rootcause::Report>
+    {
+        let directory = TestDirectory::new("chromedriver-history-subscription")?;
+        let status_server = FixtureServer::start(HashMap::from([(
+            "/status".to_owned(),
+            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
+        )]))
+        .await?;
+        let executable = directory.path().join("fake-chromedriver.sh");
+        write_executable(
+            &executable,
+            &format!(
+                "#!/bin/sh\ntrap 'echo shutdown-complete; exit 0' TERM INT\nprintf 'crlf-terminated\\r\\n'\necho 'ChromeDriver was started successfully on port {}.'\nwhile :; do sleep 1 & wait $!; done\n",
+                status_server.port()
+            ),
+        )
+        .await?;
+
+        let process = launch(
+            ChromeDriverLaunchRequest {
+                executable,
+                cache_lease: test_cache_lease(&directory).await?,
+                config: ChromeDriverConfig::default(),
+                cancellation: CancellationToken::new(),
+            },
+            &test_status_client()?,
+            &test_lifecycle(),
+        )
+        .await?;
+        let (history, mut subscription) = process.subscribe_output_with_history();
+        process.terminate().await?;
+
+        let history = history
+            .into_iter()
+            .map(|line| line.line)
+            .collect::<Vec<_>>();
+        assert_that!(history.iter().any(|line| line == "crlf-terminated"))
+            .with_detail_message("a `\\r\\n` terminator must be stripped completely")
+            .is_true();
+        let mut subscribed = Vec::new();
+        while let Ok(line) = subscription.recv().await {
+            subscribed.push(line.line);
+        }
+        assert_that!(subscribed).contains_exactly(["shutdown-complete".to_owned()]);
         Ok(())
     }
 

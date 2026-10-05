@@ -1,8 +1,7 @@
 //! Verifies that multiple `WebDriver` sessions can run concurrently against a single shared
-//! [`Chromedriver`].
+//! [`ChromeForTesting`].
 
-use assertr::prelude::*;
-use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
+use chrome_for_testing_manager::ChromeForTesting;
 use rootcause::Report;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -13,27 +12,26 @@ mod common;
 async fn multiple_sessions() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    let chromedriver = Arc::new(Chromedriver::run(ChromedriverRunConfig::default()).await?);
+    let chrome = Arc::new(ChromeForTesting::launch(common::chrome_config()).await?);
 
     let mut tests = JoinSet::new();
     for _ in 0..5 {
-        let chromedriver = Arc::clone(&chromedriver);
+        let chrome = Arc::clone(&chrome);
         tests.spawn(async move {
-            chromedriver
+            chrome
                 .session()
-                .run(common::wikipedia::test_wikipedia)
+                .run(common::browser_flow::exercise_browser_flow)
                 .await
         });
     }
 
-    let results = tests.join_all().await;
-    for result in results {
-        assert_that!(result).is_ok();
+    for result in tests.join_all().await {
+        result?;
     }
 
-    let _exit_status = Arc::try_unwrap(chromedriver)
-        .expect("no more clones of chromedriver to be alive")
-        .terminate()
+    let _exit_status = Arc::try_unwrap(chrome)
+        .expect("no more clones of ChromeForTesting to be alive")
+        .shutdown()
         .await?;
 
     Ok(())

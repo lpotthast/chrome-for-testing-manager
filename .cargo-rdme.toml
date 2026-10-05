@@ -1,0 +1,6 @@
+# Generate the README from the crate-level docs in `src/lib.rs` with `just readme`.
+line-terminator = "lf"
+
+[intralinks]
+# Resolving intra-doc links into docs.rs links requires a pinned nightly toolchain; render them as plain text instead.
+strip-links = true

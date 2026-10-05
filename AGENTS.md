@@ -2,69 +2,56 @@
 
 ## Project Structure & Module Organization
 
-This is a Rust 2024 library crate for programmatic management of Chrome for Testing and ChromeDriver installations. It
-downloads `chrome` and `chromedriver` binaries into a local cache, spawns ChromeDriver on configurable or OS-assigned
-ports, and provides optional session management through `thirtyfour`. It is built on the `chrome-for-testing` crate for
-Chrome for Testing API interaction.
+This Rust 2024 library manages Chrome for Testing installations, cached artifacts, driver processes, and optional
+WebDriver sessions. Source lives in `src/`; `src/lib.rs` defines the public API through re-exports. The `src/facade/`
+tree owns the high-level `ChromeForTesting` facade and its user-facing configuration. The `src/chromedriver/` tree
+owns technical driver configuration, launch, the guarded process, and output subscriptions. The `src/artifact_store/`
+and `src/cache/` trees own atomic artifact publication and cache locking respectively. The `src/version/` tree owns
+version types and release-manifest resolution, while `src/session/` owns scoped sessions, their builder, and Headless
+Shell. The lean `src/manager/` tree composes those domain services behind the lower-level manager facade.
+Cross-cutting policies, errors, ports, shared guarded-process scaffolding (`src/process_support.rs`), and abort-safe
+operation ownership remain focused root modules.
 
-Source lives in `src/`; `src/lib.rs` defines the public surface by re-exporting types from internal modules. Key modules
-include `chromedriver.rs` for the high-level entry point, `mgr.rs` for version resolution/download/launch orchestration,
-`session.rs` for `thirtyfour` session helpers, and `cache.rs`, `download.rs`, and `port.rs` for supporting behavior.
+Integration tests live in `tests/`, with reusable browser flows under `tests/common/`. Public documentation belongs in
+`README.md`; release notes belong in `CHANGELOG.md`.
 
-Integration tests live in `tests/`, with shared helpers under `tests/common/`. There is no asset tree. Public
-documentation belongs in `README.md`; release notes belong in `CHANGELOG.md`.
+## Architecture & Feature Boundaries
 
-## Architecture Notes
-
-All public types should be re-exported from `src/lib.rs` so users can import them from the crate root, for example
-`chrome_for_testing_manager::Chromedriver`. `Chromedriver` is the main entry point for resolving a version, downloading
-binaries, and spawning ChromeDriver. `ChromeForTestingManager` contains the lower-level resolution, download, and launch
-operations. `Session` wraps `thirtyfour::WebDriver` when the `thirtyfour` feature is enabled and supports cleanup-oriented
-session helpers. `VersionRequest` selects latest, channel-specific, or fixed versions; `PortRequest` selects OS-assigned
-or specific ports.
-
-Keep `thirtyfour`-dependent APIs, including session management and capability preparation, behind the existing
-`thirtyfour` feature gate.
+Re-export public types from `src/lib.rs` for crate-root imports. Keep session management, capability preparation, and
+other `thirtyfour`-dependent APIs behind the existing feature. Preserve cancellation-safe cleanup and transactional
+cache behavior when changing downloads or process lifecycles.
 
 ## Build, Test, and Development Commands
 
-- `cargo build`: build the crate.
-- `cargo test --all --all-features`: run tests with the optional `thirtyfour` feature enabled.
+- `cargo build`: build the library with default features.
+- `cargo test --all --all-features`: run the complete test suite.
 - `cargo test <test_name> --all-features`: run one named test.
-- `cargo fmt`: format Rust code.
-- `cargo clippy --all --all-features -- -W clippy::pedantic`: lint with pedantic warnings.
-- `cargo doc --no-deps --all-features`: build crate docs.
-- `just tidy`: run the full maintenance pipeline: update, sort, format, check, clippy, tests, and docs.
-- `just install-tools`: install helper tools used by the `Justfile`.
-- `just minimal-versions`: verify that direct minimum dependency version bounds are sufficient.
+- `cargo fmt --all`: format Rust sources.
+- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`: run strict linting.
+- `cargo doc --no-deps --all-features`: build API documentation.
+- `just verify`: run the full non-mutating validation pipeline.
+- `just tidy`: update dependencies, sort manifests, and format files; expect maintained files to change.
 
 ## Coding Style & Naming Conventions
 
-Use standard `rustfmt` formatting and Rust naming conventions: `snake_case` for modules, functions, and tests;
-`CamelCase` for public types such as `Chromedriver`, `VersionRequest`, and `PortRequest`. Keep user-facing APIs
-re-exported through `src/lib.rs`. Prefer focused modules that match existing responsibilities.
-
-The crate targets Rust `1.89.0` and edition `2024`, and is licensed as `MIT OR Apache-2.0`. Treat Clippy pedantic
-warnings as actionable unless there is a clear reason to allow one locally.
+Follow `rustfmt` and standard Rust naming: `snake_case` for modules, functions, and tests; `CamelCase` for types such as
+`ChromeForTesting` and `VersionRequest`. The crate targets Rust 1.89.0. Treat missing-documentation and Clippy pedantic
+warnings as actionable; use narrowly scoped allowances only when justified. Start every module with `//!`
+documentation describing its responsibility, boundaries, and important lifecycle or safety invariants.
 
 ## Testing Guidelines
 
-Integration tests spawn real ChromeDriver processes and may hit the Chrome for Testing API, so they require
-network/process support and `--all-features`. Use `#[tokio::test(flavor = "multi_thread")]`; the library expects a
-multi-threaded Tokio runtime. Shared browser-flow logic should go in `tests/common/`. Follow the existing descriptive
-test naming pattern, for example `single_session` or `custom_termination_with_timeouts`.
-
-Use `assertr` for assertions where it matches the surrounding tests. Tests use `serial_test` for process/cache isolation
-and `ctor` for one-time tracing initialization.
+Browser integration tests may access the network and spawn real ChromeDriver processes. Use multi-threaded Tokio tests,
+descriptive names such as `single_session`, and `assertr` where it matches surrounding code. Put shared setup in
+`tests/common/` and initialize tracing opportunistically for diagnostics. Report any skipped network or process tests.
 
 ## Commit & Pull Request Guidelines
 
-Recent commit history uses short, imperative summaries such as `Fix dead code warning`, `Update readme`, and
-`Prepare v0.7.0`; follow that style. For pull requests, include a concise description, relevant issue links, and the
-commands you ran. Note any skipped browser/integration tests and why.
+Use short, imperative commit subjects, following history such as `Fix lints` and `Simplify entry`. Pull requests should
+summarize behavior changes, link relevant issues, list verification commands, and explain skipped checks. Include
+screenshots only when a user-visible interface changes.
 
 ## Security & Configuration Tips
 
-Do not commit downloaded Chrome/ChromeDriver binaries, local caches, or generated build output. Keep feature-gated
-`thirtyfour` behavior behind the existing Cargo feature boundary, and avoid adding tests that depend on a locally
-installed Chrome when Chrome for Testing should be resolved by the crate.
+Do not commit downloaded browser binaries, local caches, credentials, or generated build output. Tests should resolve
+Chrome for Testing through the crate rather than depend on a locally installed browser.

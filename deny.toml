@@ -1,0 +1,4 @@
+# Configuration for `cargo deny check advisories` (run by CI's advisories job).
+[advisories]
+version = 2
+yanked = "deny"

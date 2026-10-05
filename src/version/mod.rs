@@ -1,4 +1,12 @@
-use chrome_for_testing::{
+//! Version requests and artifact-aware resolved release descriptions.
+//!
+//! The resolver submodule performs network lookup; the types here record the exact platform and
+//! artifacts later installation steps must honor.
+
+pub(crate) mod resolver;
+
+use crate::BrowserArtifactRequest;
+use ::chrome_for_testing::{
     Channel, Download, Platform, Version, VersionInChannel, VersionWithoutChannel,
 };
 
@@ -62,12 +70,15 @@ impl VersionRequest {
 /// A version of Chrome and `ChromeDriver` that has been resolved against the
 /// chrome-for-testing release index but not yet downloaded.
 ///
-/// Construct via [`crate::ChromeForTestingManager::resolve_version`] and pass into
-/// [`crate::ChromeForTestingManager::download`] with one or more [`crate::ChromeBinary`] values.
-#[derive(Debug)]
+/// Construct via [`crate::ChromeForTestingManager::resolve_version`]. The selected value records
+/// its non-empty [`crate::BrowserArtifactRequest`], and [`crate::ChromeForTestingManager::download`]
+/// installs exactly that resolved set.
+#[derive(Debug, Clone)]
 pub struct SelectedVersion {
     pub(crate) channel: Option<Channel>,
     pub(crate) version: Version,
+    pub(crate) platform: Platform,
+    pub(crate) requested_artifacts: BrowserArtifactRequest,
     pub(crate) chrome: Option<Download>,
     pub(crate) chrome_headless_shell: Option<Download>,
     pub(crate) chromedriver: Option<Download>,
@@ -85,6 +96,18 @@ impl SelectedVersion {
     #[must_use]
     pub fn version(&self) -> Version {
         self.version
+    }
+
+    /// The platform for which this version was resolved.
+    #[must_use]
+    pub const fn platform(&self) -> Platform {
+        self.platform
+    }
+
+    /// The non-empty browser artifact set guaranteed by this resolution.
+    #[must_use]
+    pub const fn requested_artifacts(&self) -> BrowserArtifactRequest {
+        self.requested_artifacts
     }
 
     /// Whether a Chrome download exists for this version on the detected platform.
@@ -106,26 +129,36 @@ impl SelectedVersion {
     }
 }
 
-impl From<(VersionWithoutChannel, Platform)> for SelectedVersion {
-    fn from((v, p): (VersionWithoutChannel, Platform)) -> Self {
+impl SelectedVersion {
+    pub(crate) fn from_version(
+        v: &VersionWithoutChannel,
+        p: Platform,
+        requested_artifacts: BrowserArtifactRequest,
+    ) -> Self {
         SelectedVersion {
             channel: None,
             version: v.version,
+            platform: p,
+            requested_artifacts,
             chrome: v.downloads.chrome_for_platform(p).cloned(),
             chrome_headless_shell: v.downloads.chrome_headless_shell_for_platform(p).cloned(),
             chromedriver: v.downloads.chromedriver_for_platform(p).cloned(),
         }
     }
-}
 
-impl From<(VersionInChannel, Platform)> for SelectedVersion {
-    fn from((v, p): (VersionInChannel, Platform)) -> Self {
+    pub(crate) fn from_channel_version(
+        v: VersionInChannel,
+        p: Platform,
+        requested_artifacts: BrowserArtifactRequest,
+    ) -> Self {
         let chrome_download = v.downloads.chrome_for_platform(p).cloned();
         let chromedriver_download = v.downloads.chromedriver_for_platform(p).cloned();
 
         SelectedVersion {
             channel: Some(v.channel),
             version: v.version,
+            platform: p,
+            requested_artifacts,
             chrome: chrome_download,
             chrome_headless_shell: v.downloads.chrome_headless_shell_for_platform(p).cloned(),
             chromedriver: chromedriver_download,

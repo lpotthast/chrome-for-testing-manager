@@ -1,24 +1,25 @@
 //! Smoke test for scoped sessions using the Chrome Headless Shell binary.
 
 use assertr::prelude::*;
-use chrome_for_testing_manager::{ChromeBinary, Chromedriver, ChromedriverRunConfig, Session};
+use chrome_for_testing_manager::{ChromeBinary, ChromeForTesting, ChromeForTestingConfig, Session};
 use rootcause::Report;
 use std::time::Duration;
 use thirtyfour::prelude::*;
+
+mod common;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn headless_shell_session() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    let config = ChromedriverRunConfig::builder()
+    let config = ChromeForTestingConfig::builder()
+        .cache_dir(common::cache_dir())
         .chrome_binary(ChromeBinary::ChromeHeadlessShell)
         .build();
 
-    Chromedriver::run(config)
-        .await?
-        .session()
-        .run(test_local_page)
-        .await?;
+    let chrome = ChromeForTesting::launch(config).await?;
+    chrome.session().run(test_local_page).await?;
+    chrome.shutdown().await?;
 
     Ok(())
 }

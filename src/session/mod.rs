@@ -1,6 +1,17 @@
-use crate::ChromeForTestingManagerError;
+//! Scoped `thirtyfour` sessions and auxiliary browser lifecycle support.
+//!
+//! Session operations own connection and cleanup ordering, including the separate Chrome Headless
+//! Shell process required for attached sessions.
+
+mod builder;
+pub(crate) mod headless_shell;
+
+pub use builder::SessionBuilder;
+
+use crate::ChromeForTestingError;
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
+use std::ops::Deref;
 
 /// A browser session. Used to control the browser.
 ///
@@ -17,15 +28,15 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if the underlying `WebDriver` session cannot be closed.
-    pub(crate) async fn quit(self) -> Result<(), Report<ChromeForTestingManagerError>> {
+    pub(crate) async fn quit(self) -> Result<(), Report<ChromeForTestingError>> {
         self.driver
             .quit()
             .await
-            .context(ChromeForTestingManagerError::QuitSession)
+            .context(ChromeForTestingError::QuitSession)
     }
 }
 
-impl std::ops::Deref for Session {
+impl Deref for Session {
     type Target = thirtyfour::WebDriver;
 
     fn deref(&self) -> &Self::Target {

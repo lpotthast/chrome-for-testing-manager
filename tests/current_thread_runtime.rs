@@ -1,18 +1,23 @@
-//! Verifies that [`Chromedriver::run`] rejects current-thread Tokio runtimes with a useful error.
+//! Verifies that [`ChromeForTesting::launch`] rejects current-thread Tokio runtimes with a typed error.
 
 use assertr::prelude::*;
-use chrome_for_testing_manager::{Chromedriver, ChromedriverRunConfig};
+use chrome_for_testing_manager::{ChromeForTesting, ChromeForTestingConfig, ChromeForTestingError};
 use rootcause::Report;
 
 #[tokio::test]
 async fn unusable_on_non_multithreaded_runtime() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
 
-    assert_that!(Chromedriver::run(ChromedriverRunConfig::default()).await)
-        .is_err()
-        .derive(ToString::to_string)
-        .contains("chromedriver requires a multi-threaded Tokio runtime")
-        .contains("detected CurrentThread");
+    let error = ChromeForTesting::launch(ChromeForTestingConfig::default())
+        .await
+        .expect_err("a current-thread runtime must be rejected");
+    assert_that!(matches!(
+        error.current_context(),
+        ChromeForTestingError::UnsupportedRuntime {
+            runtime_flavor: tokio::runtime::RuntimeFlavor::CurrentThread,
+        }
+    ))
+    .is_true();
 
     Ok(())
 }

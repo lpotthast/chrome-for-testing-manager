@@ -2,8 +2,119 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/),
-and this project adheres to [Semantic Versioning](https://semver.org/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres
+to [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+### Added
+
+- Re-exported `CancellationToken` and added a typed `Cancelled` error for opt-in cooperative cancellation. Pass a token
+  through `ChromeForTestingConfig::builder().cancellation(...)`, `SessionBuilder::with_cancellation(...)`, or the
+  lower-level manager methods; without one, operations simply run to completion.
+- Added `ChromeForTestingConfig` as the user-facing configuration, with version, binary, cache, cancellation, and
+  policy settings directly available and the technical port setting grouped under `ChromeDriverConfig`.
+- Added `ChromeForTestingManagerConfig` combining cache location, `NetworkPolicy` (connect, manifest, and artifact
+  download deadlines), and `LifecyclePolicy` (graceful shutdown, startup, and session-cleanup deadlines).
+- Added `ChromeDriverProcess`, an owned guarded process exposing the bound port, a bounded non-blocking
+  `subscribe_output()`, and explicit consuming termination without exposing `tokio-process-tools` generic process
+  types. `ChromeForTesting` exposes the same `subscribe_output()` plus `browser_executable()`, so non-`thirtyfour`
+  WebDriver clients connecting through `driver_port()` can register the cached browser binary in their capabilities.
+- Added `BrowserArtifactRequest` and artifact-aware version resolution, `ChromeForTestingManager::download_for` for
+  installing a single browser package, `prune_cache` with `CachePruneResult`, and typed cache-in-use, cache-lock,
+  staging, marker, and atomic-installation errors.
+- Added `ChromeForTesting::selected_version()`, exposing the concrete version, channel, and platform that resolution
+  selected for `Latest`-style requests.
+- Added archive hardening limits: artifact downloads are capped at 2 GiB (typed `DownloadTooLarge` error) and archives
+  with more than 65,536 entries are rejected (typed `ZipTooManyEntries` error), complementing the existing
+  decompressed-size limit.
+- Added a typed `MissingRuntime` error: polling `launch` from a thread without an active Tokio runtime now returns an
+  error instead of panicking in `Handle::current()`.
+- Added a GitHub Actions CI workflow (fmt, pedantic clippy, tests on Linux/macOS/Windows, MSRV 1.89.0 check,
+  no-default doc and doctest builds, `cargo deny check advisories`) and a `deny.toml` advisories configuration.
+
+### Changed
+
+- **Breaking:** Replaced the high-level `Chromedriver` / `ChromedriverRunConfig` API with
+  `ChromeForTesting::launch(ChromeForTestingConfig)`, `driver_port()`, and `shutdown()`. The new facade does not
+  expose the lower-level manager concept in its configuration.
+- **Breaking:** Renamed `ChromeForTestingManagerError` to `ChromeForTestingError` and normalized public `ChromeDriver`
+  type spelling. Error variants covering the same failure across artifacts are unified and carry a
+  `ChromeForTestingArtifact` field (e.g. `SpawnProcess`, `WaitForStartup`, `NoArtifactDownload`).
+- **Breaking:** `SessionBuilder::run` now takes only the user closure; cancellation moved to the optional
+  `with_cancellation` step. Cancellation is returned as `ChromeForTestingError::Cancelled` after cleanup is drained.
+- **Breaking:** `ChromeForTestingManager::launch_driver` now consumes `ChromeDriverConfig` and returns
+  `ChromeDriverProcess` instead of accepting loose port/output/shutdown arguments and returning a process, port, and
+  output-inspector tuple. Shared child-process shutdown now belongs to `LifecyclePolicy` rather than the driver-only
+  configuration.
+- **Breaking:** `resolve_version` now takes a non-empty `BrowserArtifactRequest`, and `download`
+  installs the artifact set recorded in `SelectedVersion` instead of accepting a separate slice.
+  This prevents resolving a version that lacks a later-requested browser package.
+- **Breaking:** Replaced the `LoadedBrowserPackage` enum and the duplicate `LoadedChromePackage` /
+  `LoadedChromeHeadlessShellPackage` wrappers with one `LoadedBrowserPackage` struct containing `ChromeBinary`, browser
+  path, driver path, and a hidden shared cache lease.
+- Artifact installation is now an atomic cross-process transaction. Downloads hold a shared cache lease plus a
+  per-artifact exclusive lock, use unique staging directories, validate the expected executable and completion marker,
+  then atomically rename into place. Legacy unmarked or invalid packages are reinstalled once. Already-installed
+  packages are validated lock-free through the completion marker and executable size, so cache hits neither hash the
+  binaries nor serialize concurrent launches.
+- ZIP extraction now runs on an awaited blocking worker with cooperative per-entry and bounded-copy cancellation,
+  enclosed-path checks, relocation-safe relative symlinks confined to the published package, deferred Unix permissions,
+  CRC checking, and an actual extracted-size limit.
+- Concurrent artifact operations are always drained. A real operation failure remains primary over derivative sibling
+  cancellations; caller cancellation remains primary and cleanup failures are attached as children.
+- Spawned processes are guarded immediately, startup output closure is distinguished from timeout, and WebDriver
+  connections finish before acquired resources are cleaned up. Headless Shell sessions quit WebDriver before
+  terminating the attached browser. WebDriver cleanup honors `SessionBuilder::with_config`.
+- Cleanup-sensitive public futures (artifact installation, driver launch, WebDriver connection and cleanup) delegate
+  ownership to detached cancellation-aware tasks, so dropping a caller future requests cancellation without abandoning
+  staged files, processes, or an in-flight WebDriver handshake. The guarantee is documented once in the crate-level
+  "Cancellation and drop safety" section.
+- ChromeDriver readiness requires startup output from the spawned child before `/status` is accepted.
+  Fixed ports are checked against the child's reported port, with a typed mismatch error. Driver
+  output is continuously drained into bounded subscriptions, so slow subscribers cannot
+  backpressure the child process.
+- Chrome Headless Shell rejects capability options that cannot be applied after attaching
+  ChromeDriver, rather than silently ignoring them.
+- `prepare_caps` returns a typed error for non-Unicode browser paths instead of panicking.
+- `PortRequest::Any` now passes `--port=0` explicitly, and a bare `0u16` maps to that request rather
+  than constructing an invalid fixed port.
+- **Breaking:** Removed the `DriverOutputListener` callback API and the `sequence` field on `DriverOutputLine`. Driver
+  output is observed exclusively through `subscribe_output()` subscriptions with typed lag errors; subscriptions remain
+  active through explicit process termination.
+- **Breaking:** Configuration types (`ChromeForTestingConfig`, `ChromeForTestingManagerConfig`, `ChromeDriverConfig`)
+  are write-only builder inputs and no longer expose field getters.
+- **Breaking:** `Port` is backed by `NonZeroU16` and no longer implements `AsRef<u16>`; use `as_u16()`.
+- Managed `WebDriver` sessions connect to `chromedriver` via `127.0.0.1`, matching the readiness probe, instead of
+  relying on `localhost` resolution.
+- Split version resolution, artifact storage, driver processes, sessions, and Headless Shell handling into focused
+  modules (`facade/`, `manager/`, `artifact_store/`, `cache/`, `chromedriver/`, `session/`, `version/`) with shared
+  guarded-process scaffolding in `process_support`. The manager builds two HTTP clients: one external (manifest plus
+  artifact downloads, with a per-request download deadline) and one no-proxy local client (driver status and DevTools).
+- Browser tests use isolated checkout-local caches and local `data:` pages; deterministic local `axum` HTTP fixtures
+  cover cancellation, malformed archives, concurrent installs, marker migration, and cache leases.
+- `futures` is now optional with the `thirtyfour` feature.
+- The ChromeDriver `/status` readiness probe now bounds the whole request, response body included, by the startup
+  deadline. Previously a server that sent headers and then stalled the body could extend startup past the timeout.
+- Documentation now matches the actual cache validation: cache hits are revalidated through the completion marker and
+  executable size only; no content hashing takes place.
+- Integration tests requiring `thirtyfour` are declared with `required-features` instead of a self dev-dependency, so
+  `--no-default-features` builds, docs, and doctests validate the real feature-less surface. The facade example is
+  feature-gated accordingly, and integration tests shut the environment down explicitly.
+- Updated `chrome-for-testing` to version 0.5.0, including Linux ARM64 manifest support.
+- Updated `tokio-process-tools` to version `0.11.2`.
+
+### Removed
+
+- Removed the old `Chromedriver`, `ChromedriverRunConfig`, `ChromedriverProcess`, and `launch_chromedriver` public names;
+  unreleased 0.13 provides no compatibility aliases for these breaking replacements.
+- Removed public `DriverOutputInspectors`; it is owned internally by `ChromeDriverProcess`.
+- **Breaking:** Removed obsolete `RemoveCacheDir`, `RecreateCacheDir`, and `DownloadStalled` error variants.
+- **Breaking:** Removed the panicking `From<u16> for Port` impl; use `Port::new` / `Port::try_new`, or pass a bare
+  `u16` where `Into<PortRequest>` is accepted.
+- Removed the readiness poll interval, output channel capacity, and local request timeout knobs; they are now
+  fixed internal constants (50 ms, 1024 lines, 10 s).
+- Removed the `ctor` and `serial_test` test dependencies.
 
 ## [0.12.0] - 2026-06-16
 
@@ -25,8 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Breaking:** `ChromedriverRunConfig` fields are no longer public. Construct configs through
   `ChromedriverRunConfig::builder()` or `Default` instead of struct literals or direct field mutation.
-- **Breaking:** `Port` is now opaque. Use `Port::new(value)` to construct one and `port.as_u16()` to read the raw
-  value instead of `Port(value)` or `.0`.
+- **Breaking:** `Port` is now opaque. Use `Port::new(value)` to construct one and `port.as_u16()` to read the raw value
+  instead of `Port(value)` or `.0`.
 - **Breaking:** `VersionRequest` is now `#[non_exhaustive]`. Downstream exhaustive matches need a wildcard arm.
 - **Breaking:** `DefaultCaps` and `DefaultConfig` are no longer re-exported from the crate root. These are internal
   session-builder type-state markers and do not need to be named by callers using the fluent session API.
@@ -34,8 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `&[ChromeBinary]` request and returns `Vec<LoadedBrowserPackage>`. Passing an empty slice returns an error.
 - **Breaking:** `ChromeForTestingManager::launch_chromedriver(...)` and `prepare_caps(...)` now take
   `LoadedBrowserPackage`, while `LoadedChromePackage` specifically means the regular Chrome package.
-- **Breaking:** `ChromeForTestingManagerError::PrepareChromeCapabilities` now stores a `browser_executable` path
-  instead of a `chrome_executable` path.
+- **Breaking:** `ChromeForTestingManagerError::PrepareChromeCapabilities` now stores a `browser_executable` path instead
+  of a `chrome_executable` path.
 - Invalid Chrome Headless Shell `--remote-debugging-port` arguments are rejected during session setup with a targeted
   error instead of failing later as browser startup timeouts.
 - Upgrade `rootcause` dependency to 0.13.0.
@@ -63,8 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `ChromedriverRunConfig` now has a `graceful_shutdown: GracefulShutdown` field for configuring the on-drop and
   on-terminate graceful termination budgets, defaulting to a single 3s timeout on all systems.
 - Re-export `tokio_process_tools::GracefulShutdown`, `GracefulShutdownBuilder`, `UnixGracefulPhase`,
-  `UnixGracefulShutdown`, `UnixGracefulSignal`, and `WindowsGracefulShutdown` from the crate root for constructing
-  the `graceful_shutdown` value.
+  `UnixGracefulShutdown`, `UnixGracefulSignal`, and `WindowsGracefulShutdown` from the crate root for constructing the
+  `graceful_shutdown` value.
 - `ChromeForTestingManager::new_with_cache_dir(PathBuf)` constructor for pinning a custom cache directory.
 - `From<u16>` and `From<Port>` impls for `PortRequest`. The builder's `port` field now uses `setter(into)`, so
   `.port(8080u16)` works without `PortRequest::Specific(Port(...))` wrapping.
@@ -89,24 +200,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (previously `pub(crate)`). `Chromedriver` remains the recommended entry point though. Reach for the lower-level
   manager when you need to pre-warm the cache, run multiple chromedriver instances off a single download, pin a custom
   cache directory, or drive sessions through a non-`thirtyfour` WebDriver client.
-- `ChromeForTestingManager::launch_chromedriver` now takes a `GracefulShutdown` argument. It is applied to the
-  internal cleanup that fires when chromedriver fails to report successful startup, so the budget configured on
+- `ChromeForTestingManager::launch_chromedriver` now takes a `GracefulShutdown` argument. It is applied to the internal
+  cleanup that fires when chromedriver fails to report successful startup, so the budget configured on
   `ChromedriverRunConfig::graceful_shutdown` is honored on the startup-failure path as well.
 - `DriverOutputInspectors` is now `pub` (previously `pub(crate)`); required when calling `launch_chromedriver`
   directly.
 - `LoadedChromePackage` and `SelectedVersion` are now re-exported from the crate root.
 - `with_custom_session` setup closure bound relaxed from `Fn` to `FnOnce`, so callers can move owned state into it.
 - `Chromedriver::terminate` now honors the configured `graceful_shutdown` budget.
-- The internal browser-driver output stream now uses `tokio-process-tools`' `reliable_with_backpressure` policy. A
-  slow `DriverOutputListener` will backpressure `chromedriver`'s stdout/stderr. Keep listener callbacks non-blocking.
+- The internal browser-driver output stream now uses `tokio-process-tools`' `reliable_with_backpressure` policy. A slow
+  `DriverOutputListener` will backpressure `chromedriver`'s stdout/stderr. Keep listener callbacks non-blocking.
 - README introduction rewritten: new "Why use it" overview, a configuration snippet covering version pinning, fixed
   ports, output listeners and graceful shutdown, and a "Going lower-level" section describing
   `ChromeForTestingManager`. The example now uses `Chromedriver::run_default()`.
 
 ### Removed
 
-- **Breaking:** `Chromedriver::terminate_with_timeouts(interrupt, terminate)` has been removed. Configure the
-  shutdown via `ChromedriverRunConfig::graceful_shutdown` and call `Chromedriver::terminate()` instead.
+- **Breaking:** `Chromedriver::terminate_with_timeouts(interrupt, terminate)` has been removed. Configure the shutdown
+  via `ChromedriverRunConfig::graceful_shutdown` and call `Chromedriver::terminate()` instead.
 
 ## [0.9.1] - 2026-04-14
 

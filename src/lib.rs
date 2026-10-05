@@ -205,7 +205,7 @@
 //!
 //! The cache contents live in a layout-versioned directory beneath the cache root, so releases with incompatible on-disk
 //! layouts can share one cache root without replacing each other's packages. Releases before 0.13 stored versions
-//! directly in the cache root; neither `clear_cache()` nor `prune_cache(...)` touches those, so delete them manually once
+//! directly in the cache root. Neither `clear_cache()` nor `prune_cache(...)` touches those, so delete them manually once
 //! no older release uses them.
 //!
 //! # Cancellation and drop safety

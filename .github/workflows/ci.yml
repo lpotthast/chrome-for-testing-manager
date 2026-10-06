@@ -72,8 +72,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor, which Chrome's sandbox
+      # needs. Lift the restriction instead of running Chrome with `--no-sandbox`.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # The non-headless browser test needs a display server, which CI runners do not provide.
-      - run: cargo test --tests --all-features --locked -- --skip single_session_non_headless
+      - run: cargo test --tests --all-features --locked --no-fail-fast -- --skip single_session_non_headless
 
   readme:
     runs-on: ubuntu-latest

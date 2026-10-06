@@ -240,7 +240,9 @@ mod tests {
         CancellationToken, ChromeForTestingError, GracefulShutdown,
         cache::{CacheDir, CacheLease},
         policy::LifecyclePolicy,
-        test_support::{FixtureServer, ResponseSpec, TestDirectory, cache_lease, write_executable},
+        test_support::{
+            FakeChromedriverBinaryBuilder, FixtureServer, ResponseSpec, TestDirectory, cache_lease,
+        },
     };
     #[cfg(unix)]
     use std::{collections::HashMap, time::Duration};
@@ -277,8 +279,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn early_exit_is_reported_with_its_status() -> Result<(), rootcause::Report> {
         let directory = TestDirectory::new("chromedriver-startup-output-closed")?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(&executable, "#!/bin/sh\nexit 0\n").await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .exit(0)
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let error = launch(
             ChromeDriverLaunchRequest {
@@ -310,15 +314,12 @@ mod tests {
             ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
         )]))
         .await?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            &format!(
-                "#!/bin/sh\ntrap 'echo shutdown-complete; exit 0' TERM INT\necho 'ChromeDriver was started successfully on port {}.'\nwhile :; do sleep 1 & wait $!; done\n",
-                status_server.port()
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .on_termination_print("shutdown-complete")
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let process = launch(
             ChromeDriverLaunchRequest {
@@ -356,15 +357,13 @@ mod tests {
             ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
         )]))
         .await?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            &format!(
-                "#!/bin/sh\ntrap 'echo shutdown-complete; exit 0' TERM INT\nprintf 'crlf-terminated\\r\\n'\necho 'ChromeDriver was started successfully on port {}.'\nwhile :; do sleep 1 & wait $!; done\n",
-                status_server.port()
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .on_termination_print("shutdown-complete")
+            .print_crlf_line("crlf-terminated")
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let process = launch(
             ChromeDriverLaunchRequest {
@@ -405,15 +404,11 @@ mod tests {
             ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
         )]))
         .await?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            &format!(
-                "#!/bin/sh\ntrap 'exit 0' TERM INT\necho 'ChromeDriver was started successfully on port {}.'\nwhile :; do sleep 1 & wait $!; done\n",
-                status_server.port()
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
         let cache = CacheDir::create_at(directory.path().join("cache"))?;
         let cache_lease = cache.acquire_shared(&CancellationToken::new()).await?;
         let lifecycle = test_lifecycle();
@@ -456,15 +451,11 @@ mod tests {
         let status_server =
             FixtureServer::start(HashMap::from([("/status".to_owned(), ResponseSpec::Stall)]))
                 .await?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            &format!(
-                "#!/bin/sh\ntrap 'exit 0' TERM INT\necho 'ChromeDriver was started successfully on port {}.'\nwhile :; do sleep 1 & wait $!; done\n",
-                status_server.port()
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
         let startup_timeout = Duration::from_millis(300);
         let lifecycle = LifecyclePolicy::builder()
             .graceful_shutdown(test_shutdown())
@@ -508,12 +499,10 @@ mod tests {
             ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
         )]))
         .await?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1 & wait $!; done\n",
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
         let lifecycle = LifecyclePolicy::builder()
             .graceful_shutdown(test_shutdown())
             .driver_startup_timeout(Duration::from_millis(100))
@@ -558,14 +547,11 @@ mod tests {
         } else {
             status_server.port() + 1
         });
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            &format!(
-                "#!/bin/sh\ntrap 'exit 0' TERM INT\necho 'ChromeDriver was started successfully on port {reported}.'\nwhile :; do sleep 1 & wait $!; done\n"
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(reported)
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let error = launch(
             ChromeDriverLaunchRequest {
@@ -598,27 +584,19 @@ mod tests {
     async fn cancellation_during_startup_terminates_guarded_process()
     -> Result<(), rootcause::Report> {
         let directory = TestDirectory::new("chromedriver-startup-cancellation")?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            concat!(
-                "#!/bin/sh\n",
-                "trap 'exit 0' TERM INT\n",
-                "script_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n",
-                "echo $$ > \"$script_dir/pid\"\n",
-                "touch \"$script_dir/started\"\n",
-                "while :; do sleep 1 & wait $!; done\n",
-            ),
-        )
-        .await?;
+        let pid_file = directory.path().join("pid");
+        let started_file = directory.path().join("started");
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .record_pid(&pid_file)
+            .create_file(&started_file)
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let cancellation = CancellationToken::new();
         let cancel_after_start = async {
             tokio::time::timeout(Duration::from_secs(5), async {
-                while tokio::fs::metadata(directory.path().join("started"))
-                    .await
-                    .is_err()
-                {
+                while tokio::fs::metadata(&started_file).await.is_err() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
@@ -647,7 +625,7 @@ mod tests {
             ChromeForTestingError::Cancelled
         ))
         .is_true();
-        let pid = tokio::fs::read_to_string(directory.path().join("pid")).await?;
+        let pid = tokio::fs::read_to_string(&pid_file).await?;
         let output = Command::new("kill")
             .arg("-0")
             .arg(pid.trim())
@@ -669,17 +647,13 @@ mod tests {
             ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
         )]))
         .await?;
-        let executable = directory.path().join("fake-chromedriver.sh");
         let release = directory.path().join("release");
-        write_executable(
-            &executable,
-            &format!(
-                "#!/bin/sh\necho 'ChromeDriver was started successfully on port {}.'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\necho 'exiting on my own'\n",
-                status_server.port(),
-                release.display()
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(status_server.port())
+            .wait_for_file(&release)
+            .print_line("exiting on my own")
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let process = launch(
             ChromeDriverLaunchRequest {
@@ -729,12 +703,12 @@ mod tests {
     async fn unrecognized_startup_line_fails_fast_with_recent_output()
     -> Result<(), rootcause::Report> {
         let directory = TestDirectory::new("chromedriver-unrecognized-startup")?;
-        let executable = directory.path().join("fake-chromedriver.sh");
-        write_executable(
-            &executable,
-            "#!/bin/sh\ntrap 'exit 0' TERM INT\necho 'warming up'\necho 'ChromeDriver was started successfully on port soon.'\nwhile :; do sleep 1 & wait $!; done\n",
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .print_line("warming up")
+            .announce_port("soon")
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
         let lifecycle = LifecyclePolicy::builder()
             .graceful_shutdown(test_shutdown())
             .driver_startup_timeout(Duration::from_secs(30))

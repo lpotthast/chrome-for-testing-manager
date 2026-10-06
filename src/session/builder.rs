@@ -112,7 +112,7 @@ impl<'a> SessionBuilder<'a> {
     /// Cleanup runs regardless of outcome. A panic in the user closure is caught, cleanup is
     /// attempted, and the original panic is always resumed.
     ///
-    /// The closure's error type must be a [`std::error::Error`] or a [`rootcause::Report`]. To mix
+    /// The closure's error type must be a [`std::error::Error`] or a [`Report`]. To mix
     /// error types through `?`, return `Result<T, rootcause::Report>`; convert boxed errors
     /// (`Box<dyn Error + Send + Sync>`) with `rootcause::compat::IntoRootcause::into_rootcause`.
     ///
@@ -351,6 +351,8 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::facade::ChromeForTesting;
+    #[cfg(unix)]
+    use crate::test_support::FakeChromedriverBinaryBuilder;
     use crate::test_support::{FixtureServer, ResponseSpec, TestDirectory};
     #[cfg(unix)]
     use crate::version::SelectedVersion;
@@ -365,7 +367,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unanswered_quit_is_abandoned_at_the_cleanup_deadline() -> Result<(), rootcause::Report>
+    async fn unanswered_quit_is_abandoned_at_the_cleanup_deadline() -> Result<(), Report>
     {
         let new_session =
             br#"{"value":{"sessionId":"fixture-session","capabilities":{}}}"#.to_vec();
@@ -388,7 +390,7 @@ mod tests {
         ]))
         .await?;
         let driver =
-            thirtyfour::WebDriver::builder(server.url(""), thirtyfour::ChromeCapabilities::new())
+            thirtyfour::WebDriver::builder(server.url(""), ChromeCapabilities::new())
                 .connect()
                 .await?;
         let started = Instant::now();
@@ -424,7 +426,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_during_webdriver_connection_closes_new_session()
-    -> Result<(), rootcause::Report> {
+    -> Result<(), Report> {
         let directory = TestDirectory::new("webdriver-connect-cancellation")?;
         let new_session =
             br#"{"value":{"sessionId":"fixture-session","capabilities":{}}}"#.to_vec();
@@ -481,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn repeated_setup_steps_compose_in_order() -> Result<(), rootcause::Report> {
+    async fn repeated_setup_steps_compose_in_order() -> Result<(), Report> {
         use thirtyfour::{BrowserCapabilitiesHelper, ChromiumLikeCapabilities};
 
         let directory = TestDirectory::new("session-builder-composition")?;
@@ -523,7 +525,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn synchronous_callback_panic_is_caught_and_cleanup_awaited()
-    -> Result<(), rootcause::Report> {
+    -> Result<(), Report> {
         use futures::FutureExt;
 
         let directory = TestDirectory::new("session-synchronous-panic")?;
@@ -553,7 +555,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn shutdown_waits_for_cleanup_of_dropped_session_runs() -> Result<(), rootcause::Report> {
+    async fn shutdown_waits_for_cleanup_of_dropped_session_runs() -> Result<(), Report> {
         let directory = TestDirectory::new("session-dropped-run-cleanup")?;
         let quit_delay = Duration::from_millis(500);
         let server = FixtureServer::start(session_routes(quit_delay)).await?;
@@ -615,26 +617,17 @@ mod tests {
     async fn fixture_environment(
         directory: &TestDirectory,
         server: &FixtureServer,
-    ) -> Result<ChromeForTesting, rootcause::Report> {
+    ) -> Result<ChromeForTesting, Report> {
         let manager = ChromeForTestingManager::new_with_config(
             ChromeForTestingManagerConfig::builder()
                 .cache_dir(directory.path().join("cache"))
                 .build(),
         )?;
-        let executable = directory.path().join("fake-chrome.sh");
-        crate::test_support::write_executable(
-            &executable,
-            &format!(
-                concat!(
-                    "#!/bin/sh\n",
-                    "trap 'exit 0' TERM INT\n",
-                    "echo \"ChromeDriver was started successfully on port {}.\"\n",
-                    "while :; do sleep 1 & wait $!; done\n",
-                ),
-                server.port()
-            ),
-        )
-        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
 
         let cache_lease = crate::test_support::cache_lease(manager.cache_dir()).await?;
         let loaded = LoadedBrowserPackage::new(

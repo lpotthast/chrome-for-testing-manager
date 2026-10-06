@@ -259,13 +259,121 @@ fn contains_transaction_residue_blocking(path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// Write an executable script, e.g. a fake `chromedriver`.
+/// Describes the behavior of a fake `chromedriver` executable, step by step.
+///
+/// The binary runs its steps in order and exits successfully after the last one. It exits
+/// successfully on `SIGTERM` / `SIGINT` at any point, optionally printing a line first.
+///
+/// ```ignore
+/// let executable = FakeChromedriverBinaryBuilder::new()
+///     .print_line("warming up")
+///     .announce_port(port)
+///     .idle_until_terminated()
+///     .write(directory.path().join("fake-chromedriver"))
+///     .await?;
+/// ```
 #[cfg(unix)]
-pub(crate) async fn write_executable(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+#[derive(Default)]
+pub(crate) struct FakeChromedriverBinaryBuilder {
+    on_termination: Option<String>,
+    steps: Vec<String>,
+}
 
-    tokio::fs::write(path, contents).await?;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await
+#[cfg(unix)]
+impl FakeChromedriverBinaryBuilder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Print `line` when terminated, before exiting.
+    pub(crate) fn on_termination_print(mut self, line: &str) -> Self {
+        self.on_termination = Some(line.to_owned());
+        self
+    }
+
+    /// Print `line` to stdout.
+    pub(crate) fn print_line(self, line: &str) -> Self {
+        self.step(format!("printf '%s\\n' {}", shell_quote(line)))
+    }
+
+    /// Print `line` to stdout, terminated by `\r\n` instead of `\n`.
+    pub(crate) fn print_crlf_line(self, line: &str) -> Self {
+        self.step(format!("printf '%s\\r\\n' {}", shell_quote(line)))
+    }
+
+    /// Print the line with which `ChromeDriver` announces the port it listens on.
+    pub(crate) fn announce_port(self, port: impl std::fmt::Display) -> Self {
+        self.print_line(&format!(
+            "ChromeDriver was started successfully on port {port}."
+        ))
+    }
+
+    /// Write the binary's process ID to `path`.
+    pub(crate) fn record_pid(self, path: &Path) -> Self {
+        self.step(format!("echo $$ > {}", shell_quote_path(path)))
+    }
+
+    /// Create an empty file at `path`, e.g. to signal that the binary started.
+    pub(crate) fn create_file(self, path: &Path) -> Self {
+        self.step(format!("touch {}", shell_quote_path(path)))
+    }
+
+    /// Block until a file exists at `path`.
+    pub(crate) fn wait_for_file(self, path: &Path) -> Self {
+        self.step(format!(
+            "while [ ! -e {} ]; do sleep 0.05; done",
+            shell_quote_path(path)
+        ))
+    }
+
+    /// Block until terminated.
+    pub(crate) fn idle_until_terminated(self) -> Self {
+        // Sleeping in the background keeps the binary responsive to signals. Termination signals
+        // the whole process group, and dash reports the killed `sleep` as "Terminated" on stderr,
+        // so `wait` is silenced to keep that out of captured output.
+        self.step("while :; do sleep 1 & wait $! 2>/dev/null; done".to_owned())
+    }
+
+    /// Exit with `code`.
+    pub(crate) fn exit(self, code: i32) -> Self {
+        self.step(format!("exit {code}"))
+    }
+
+    /// Write the binary to `path` and make it executable.
+    pub(crate) async fn write(self, path: impl Into<PathBuf>) -> std::io::Result<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = path.into();
+        let on_termination = self
+            .on_termination
+            .map(|line| format!("printf '%s\\n' {}; ", shell_quote(&line)))
+            .unwrap_or_default();
+        let trap = format!("{on_termination}exit 0");
+        let mut script = format!("#!/bin/sh\ntrap {} TERM INT\n", shell_quote(&trap));
+        for step in self.steps {
+            script.push_str(&step);
+            script.push('\n');
+        }
+        tokio::fs::write(&path, script).await?;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).await?;
+        Ok(path)
+    }
+
+    fn step(mut self, command: String) -> Self {
+        self.steps.push(command);
+        self
+    }
+}
+
+/// Quote `value` as a single shell word.
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+#[cfg(unix)]
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(path.to_str().expect("test paths are valid UTF-8"))
 }
 
 /// A shared lease on a (new) cache at `cache_dir`.

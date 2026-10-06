@@ -1,7 +1,7 @@
-//! Lower-level composition facade for explicit resolve, install, cache, and launch operations.
+//! Lower-level API for explicit resolve, install, cache, and launch operations.
 //!
-//! Domain services live in their owning modules; the manager wires them together and provides
-//! cancellation-aware public orchestration methods. See the
+//! The services themselves live in their own modules. The manager wires them together and
+//! provides the cancellation-aware public methods. See the
 //! [crate-level cancellation section](crate#cancellation-and-drop-safety).
 
 pub(crate) mod config;
@@ -26,7 +26,36 @@ use std::time::Duration;
 /// Overall deadline for one local `ChromeDriver` or `DevTools` request.
 const LOCAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Lower-level façade for version resolution, atomic artifact installation, and process launch.
+/// Lower-level API for version resolution, atomic artifact installation, and process launch.
+///
+/// [`crate::ChromeForTesting`] composes these steps. Use the manager directly to run them
+/// separately, e.g. to pre-warm the cache or to launch several `ChromeDriver` processes off one
+/// download. Clones share the cache, the HTTP clients, and the background cleanups.
+///
+/// ```no_run
+/// use chrome_for_testing_manager::{
+///     BrowserArtifactRequest, CancellationToken, ChromeDriverConfig, ChromeForTestingManager,
+///     Result, VersionRequest,
+/// };
+///
+/// # async fn run() -> Result<()> {
+/// let manager = ChromeForTestingManager::new()?;
+/// let selected = manager
+///     .resolve_version(
+///         VersionRequest::stable(),
+///         BrowserArtifactRequest::Chrome,
+///         CancellationToken::new(),
+///     )
+///     .await?;
+/// let packages = manager.download(&selected, CancellationToken::new()).await?;
+/// let driver = manager
+///     .launch_driver(&packages[0], ChromeDriverConfig::default(), CancellationToken::new())
+///     .await?;
+/// println!("ChromeDriver listens on port {}", driver.port());
+/// driver.terminate().await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ChromeForTestingManager {
     resolver: VersionResolver,
@@ -44,20 +73,23 @@ pub struct ChromeForTestingManager {
 }
 
 impl ChromeForTestingManager {
-    /// Create a manager with default cache location and timeouts.
+    /// Create a manager with the default cache location and policies.
     ///
     /// # Errors
     ///
-    /// Returns an error when the platform, cache, or HTTP clients cannot be prepared.
+    /// Returns [`ChromeForTestingError::UnsupportedPlatform`] on platforms without Chrome for
+    /// Testing builds, [`ChromeForTestingError::DetermineCacheDir`] or
+    /// [`ChromeForTestingError::CreateCacheDir`] if the cache directory cannot be prepared, and
+    /// [`ChromeForTestingError::BuildHttpClient`] if an HTTP client cannot be built.
     pub fn new() -> Result<Self> {
         Self::new_with_config(ChromeForTestingManagerConfig::default())
     }
 
-    /// Create a manager with default timeouts and a custom cache directory.
+    /// Create a manager with the default policies and a custom cache directory.
     ///
     /// # Errors
     ///
-    /// Returns an error when the platform, cache, or HTTP clients cannot be prepared.
+    /// Returns the same errors as [`Self::new`].
     pub fn new_with_cache_dir(cache_dir: impl Into<PathBuf>) -> Result<Self> {
         Self::new_with_config(
             ChromeForTestingManagerConfig::builder()
@@ -66,11 +98,11 @@ impl ChromeForTestingManager {
         )
     }
 
-    /// Create a manager from explicit cache and timeout configuration.
+    /// Create a manager from an explicit configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error when the platform, cache, or HTTP clients cannot be prepared.
+    /// Returns the same errors as [`Self::new`].
     pub fn new_with_config(config: ChromeForTestingManagerConfig) -> Result<Self> {
         let ChromeForTestingManagerConfig {
             cache_dir,
@@ -147,17 +179,18 @@ impl ChromeForTestingManager {
         self.platform
     }
 
-    /// Remove every cached version when no download or loaded package holds a cache lease.
+    /// Remove every cached version, unless the cache is in use.
     ///
-    /// Unrecognized entries and the lock namespace are left untouched, and so are version
-    /// directories that releases before 0.13 stored directly in the cache root; delete those
-    /// manually once no older release uses them. This operation does
-    /// not wait for users of the cache: after a brief retry (about 100 ms) covering lock
-    /// handover, it returns [`ChromeForTestingError::CacheInUse`].
+    /// Loaded packages, running processes, and installations hold a shared cache lease. This
+    /// operation does not wait for them: after a brief retry (about 100 ms) covering lock handover,
+    /// it returns [`ChromeForTestingError::CacheInUse`]. Unrecognized entries are left untouched,
+    /// and so are version directories that releases before 0.13 stored directly in the cache root.
+    /// Delete those manually once no older release uses them.
     ///
     /// # Errors
     ///
-    /// Returns an error if the cache is in use or its entries cannot be removed.
+    /// Returns [`ChromeForTestingError::CacheInUse`] if the cache is in use, and other errors if
+    /// its entries cannot be read or removed.
     pub async fn clear_cache(&self) -> Result<()> {
         crate::ensure_runtime()?;
         self.artifact_store.cache_dir().clear().await
@@ -165,13 +198,13 @@ impl ChromeForTestingManager {
 
     /// Remove cached version directories except for the explicitly retained versions.
     ///
-    /// Like [`Self::clear_cache`], pruning is rejected while any loaded package or installation
-    /// owns a cache lease, and leaves unrecognized entries, the lock namespace, and pre-0.13
-    /// version directories untouched.
+    /// Like [`Self::clear_cache`], pruning is rejected while the cache is in use, and it leaves
+    /// unrecognized entries and pre-0.13 version directories untouched.
     ///
     /// # Errors
     ///
-    /// Returns an error if the cache is in use or an unretained version cannot be removed.
+    /// Returns [`ChromeForTestingError::CacheInUse`] if the cache is in use, and other errors if
+    /// an unretained version cannot be removed.
     pub async fn prune_cache(
         &self,
         retained_versions: &[chrome_for_testing::Version],
@@ -185,10 +218,16 @@ impl ChromeForTestingManager {
 
     /// Resolve a version request against the Chrome for Testing release manifest.
     ///
+    /// The selected release provides `ChromeDriver` and every browser package in
+    /// `requested_artifacts` for this manager's platform. [`VersionRequest::Latest`] picks the
+    /// newest such release. A channel or pinned request uses exactly its release and fails if that
+    /// release lacks a requested download.
+    ///
     /// # Errors
     ///
-    /// Returns [`ChromeForTestingError::Cancelled`] on cancellation, or an error if the
-    /// manifest cannot be fetched or no matching version exists.
+    /// Returns [`ChromeForTestingError::Cancelled`] on cancellation,
+    /// [`ChromeForTestingError::RequestVersions`] if the manifest cannot be fetched, and
+    /// [`ChromeForTestingError::NoMatchingVersion`] if no release matches.
     pub async fn resolve_version(
         &self,
         version_selection: VersionRequest,
@@ -201,11 +240,14 @@ impl ChromeForTestingManager {
             .await
     }
 
-    /// Atomically install requested browser packages and their matching `ChromeDriver`.
+    /// Atomically install the browser packages resolved in `selected` and their matching
+    /// `ChromeDriver`.
     ///
-    /// Concurrent artifact transactions are drained on every outcome, and cancellation waits for
-    /// extraction and staging cleanup before returning. Dropping the returned future cancels the
-    /// installation as well, which then rolls back in the background; see the
+    /// Returns one package per resolved browser, Chrome before Chrome Headless Shell. Artifacts
+    /// already in the cache are reused. The artifacts install concurrently, and all of them are
+    /// drained on every outcome. Cancellation waits for extraction and staging cleanup before
+    /// returning. Dropping the returned future cancels the installation as well, which then rolls
+    /// back in the background. See the
     /// [crate-level cancellation section](crate#cancellation-and-drop-safety).
     ///
     /// # Errors
@@ -261,7 +303,7 @@ impl ChromeForTestingManager {
     /// Launch the validated package's matching `ChromeDriver`.
     ///
     /// Cancellation terminates a process spawned before the error is returned. Dropping the
-    /// returned future, or the returned process, terminates it in the background; see
+    /// returned future, or the returned process, terminates it in the background. See
     /// [`Self::wait_for_background_tasks`].
     ///
     /// # Errors
@@ -303,7 +345,12 @@ impl ChromeForTestingManager {
         self.background_tasks.wait().await
     }
 
-    /// Prepare default headless Chrome capabilities for a loaded browser package.
+    /// Prepare `thirtyfour` capabilities for a loaded browser package: headless, with the cached
+    /// browser executable as the binary.
+    ///
+    /// Use them to open sessions with `thirtyfour` directly against a driver started through
+    /// [`Self::launch_driver`]. [`crate::ChromeForTesting::session`] uses them as its starting
+    /// point as well.
     ///
     /// # Errors
     ///

@@ -1,7 +1,7 @@
 //! User-facing configuration for the managed Chrome for Testing facade.
 //!
-//! Common selection and lifecycle settings remain directly discoverable; technical driver
-//! settings are grouped under [`ChromeDriverConfig`].
+//! Version, browser, cache, and policy settings live directly on [`ChromeForTestingConfig`].
+//! Settings of the `ChromeDriver` process are grouped under [`ChromeDriverConfig`].
 
 use crate::CancellationToken;
 use crate::browser::ChromeBinary;
@@ -14,8 +14,24 @@ use typed_builder::TypedBuilder;
 
 /// Configuration for launching a managed Chrome for Testing environment.
 ///
-/// Manager-independent settings are directly discoverable here. Technical `ChromeDriver`
-/// settings are grouped under [`ChromeDriverConfig`].
+/// Every setting has a default, so `ChromeForTestingConfig::default()` launches the latest Stable
+/// Chrome with an OS-assigned `ChromeDriver` port. The builder offers these setters:
+///
+/// - `version`: the Chrome for Testing version to resolve. Accepts anything implementing
+///   `Into<VersionRequest>`, such as a [`Channel`] or a [`crate::Version`]. Defaults to the latest
+///   Stable release.
+/// - `chrome_binary`: the browser package to download and run sessions against. Defaults to
+///   [`ChromeBinary::Chrome`].
+/// - `cache_dir` (or `cache_dir_opt`): the cache root. Defaults to the platform's per-user cache
+///   directory.
+/// - `cancellation` (or `cancellation_opt`): a token cancelling [`crate::ChromeForTesting::launch`]
+///   cooperatively. It covers version resolution, installation, and `ChromeDriver` startup only.
+///   Sessions are cancelled through `SessionBuilder::with_cancellation` (feature `thirtyfour`),
+///   and the launched environment is stopped with [`crate::ChromeForTesting::shutdown`]. See the
+///   [crate-level cancellation section](crate#cancellation-and-drop-safety).
+/// - `network`: the [`NetworkPolicy`] with HTTP deadlines.
+/// - `lifecycle`: the [`LifecyclePolicy`] with startup, shutdown, and session-cleanup timing.
+/// - `driver`: the [`ChromeDriverConfig`] with the `ChromeDriver` port and log level.
 ///
 /// ```
 /// use chrome_for_testing_manager::{Channel, ChromeDriverConfig, ChromeForTestingConfig};
@@ -29,31 +45,22 @@ use typed_builder::TypedBuilder;
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct ChromeForTestingConfig {
     /// The requested Chrome for Testing version.
-    ///
-    /// Accepts anything implementing `Into<VersionRequest>`, including [`Channel`] and
-    /// [`crate::Version`].
     #[builder(default = VersionRequest::LatestIn(Channel::Stable), setter(into))]
     pub(crate) version: VersionRequest,
 
-    /// The browser package to use for sessions.
+    /// The browser package to download and run sessions against.
     #[builder(default)]
     pub(crate) chrome_binary: ChromeBinary,
 
-    /// Optional cache directory. The platform-specific per-user cache is used when absent.
+    /// The cache root, or `None` for the platform's per-user cache directory.
     #[builder(default, setter(into, strip_option(fallback = cache_dir_opt)))]
     pub(crate) cache_dir: Option<PathBuf>,
 
-    /// Optional token for cooperative cancellation of [`crate::ChromeForTesting::launch`].
-    ///
-    /// It covers resolution, installation, and driver startup only. Sessions are cancelled
-    /// through [`crate::SessionBuilder::with_cancellation`], and the launched environment is
-    /// stopped with [`crate::ChromeForTesting::shutdown`] or by dropping it.
-    ///
-    /// See the [crate-level cancellation section](crate#cancellation-and-drop-safety).
+    /// Cooperative cancellation of [`crate::ChromeForTesting::launch`].
     #[builder(default, setter(strip_option(fallback = cancellation_opt)))]
     pub(crate) cancellation: Option<CancellationToken>,
 
-    /// HTTP policy shared by networked services.
+    /// HTTP deadlines.
     #[builder(default)]
     pub(crate) network: NetworkPolicy,
 
@@ -61,7 +68,7 @@ pub struct ChromeForTestingConfig {
     #[builder(default)]
     pub(crate) lifecycle: LifecyclePolicy,
 
-    /// Technical configuration for the managed `ChromeDriver` process.
+    /// Settings of the managed `ChromeDriver` process.
     #[builder(default)]
     pub(crate) driver: ChromeDriverConfig,
 }

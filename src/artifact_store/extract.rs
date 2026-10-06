@@ -26,7 +26,7 @@ const COPY_CHUNK_SIZE: usize = 64 * 1024;
 /// Maximum total number of decompressed bytes accepted from one artifact archive.
 const MAX_DECOMPRESSED_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 /// Maximum number of entries accepted from one artifact archive. Real Chrome for Testing archives
-/// stay far below this; the limit only stops file-count bombs from exhausting inodes.
+/// stay far below this. The limit only stops file-count bombs from exhausting inodes.
 const MAX_ARCHIVE_ENTRIES: usize = 65_536;
 /// Maximum length of a symlink target, in bytes. Longer targets are rejected before they are
 /// buffered.

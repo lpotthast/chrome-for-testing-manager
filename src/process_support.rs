@@ -39,7 +39,7 @@ const EXIT_OBSERVATION_GRACE: Duration = Duration::from_millis(500);
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long to wait for a killed process to exit. A process stuck in uninterruptible I/O may
-/// never exit; it is then abandoned instead of blocking shutdown forever.
+/// never exit. It is then abandoned instead of blocking shutdown forever.
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ManagedOutputStream = BroadcastOutputStream<ReliableWithBackpressure, ReplayEnabled>;
@@ -195,7 +195,7 @@ pub(crate) enum StartupStream {
 
 /// How a startup-line classifier judged one output line.
 pub(crate) enum StartupLine<T> {
-    /// Not the startup line; keep waiting.
+    /// Not the startup line. Keep waiting.
     Ignore,
 
     /// The startup line, carrying the value parsed from it.
@@ -214,8 +214,8 @@ pub(crate) struct ManagedProcess {
 
 impl ManagedProcess {
     /// Spawn `command` and start capturing its output. `name` labels the process in tracing
-    /// output; `artifact` and `executable` identify it in errors. `cache_lease` is held until the
-    /// process was terminated, and a dropped process is terminated as one of the `background`
+    /// output, and `artifact` and `executable` identify it in errors. `cache_lease` is held until
+    /// the process was terminated, and a dropped process is terminated as one of the `background`
     /// tasks.
     pub(crate) fn spawn(
         name: &'static str,

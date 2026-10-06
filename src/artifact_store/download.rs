@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 /// Maximum number of bytes accepted for one artifact archive download. Real Chrome for Testing
-/// archives stay well below this; the limit only stops a misbehaving server from filling the disk.
+/// archives stay well below this. The limit only stops a misbehaving server from filling the disk.
 const MAX_DOWNLOAD_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Download one Chrome for Testing artifact archive to a transaction-private path.

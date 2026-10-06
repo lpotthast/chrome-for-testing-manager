@@ -1,7 +1,7 @@
 //! Typed error contexts for all fallible operations.
 //!
-//! Variants carry the operational evidence needed to understand a failure; underlying causes and
-//! secondary cleanup failures are attached through `rootcause` report children.
+//! Variants carry the operational evidence needed to understand a failure. Underlying causes and
+//! secondary cleanup failures are attached as `rootcause` report children.
 
 use crate::{BrowserArtifactRequest, ChromeBinary, Port, VersionRequest};
 use ::chrome_for_testing::{Platform, Version};
@@ -75,6 +75,11 @@ impl Display for HttpClientPurpose {
 }
 
 /// Error contexts reported by chrome-for-testing-manager operations.
+///
+/// Every fallible API returns a [`Result`], a `rootcause` report whose current context is one of
+/// these variants. Match on [`Report::current_context`] to react to a specific failure. Underlying
+/// causes and secondary failures (e.g. a failed cleanup after a failed operation) are attached as
+/// report children.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ChromeForTestingError {
@@ -93,7 +98,11 @@ pub enum ChromeForTestingError {
     },
 
     /* Runtime and platform. */
-    /// No Tokio runtime is active on the calling task. Every asynchronous operation requires one.
+    /// No Tokio runtime is active on the calling task.
+    ///
+    /// Returned instead of panicking when [`crate::ChromeForTesting::launch`],
+    /// `SessionBuilder::run` (feature `thirtyfour`), or a [`crate::ChromeForTestingManager`]
+    /// operation is called outside a Tokio runtime.
     #[error("Chrome for Testing requires an active Tokio runtime; none was found")]
     MissingRuntime,
 
@@ -147,7 +156,8 @@ pub enum ChromeForTestingError {
         path: PathBuf,
     },
 
-    /// The cache contains loaded or installing artifacts and cannot currently be cleared or pruned.
+    /// The cache is in use and cannot currently be cleared or pruned. Loaded packages, running
+    /// processes, and installations hold a shared cache lease.
     #[error("cache is in use and cannot be cleared or pruned: {}", .cache_dir.display())]
     #[non_exhaustive]
     CacheInUse {
@@ -163,7 +173,7 @@ pub enum ChromeForTestingError {
         cache_dir: PathBuf,
     },
 
-    /// A cache entry could not be removed while clearing the cache.
+    /// A cache entry could not be removed while clearing or pruning the cache.
     #[error("failed to remove cache entry {}", .path.display())]
     #[non_exhaustive]
     RemoveCacheEntry {
@@ -172,7 +182,7 @@ pub enum ChromeForTestingError {
     },
 
     /* Version resolution. */
-    /// The known-good version manifest could not be requested.
+    /// The release manifest could not be requested.
     #[error("failed to request the release manifest to resolve version {version_request}")]
     #[non_exhaustive]
     RequestVersions {
@@ -180,7 +190,7 @@ pub enum ChromeForTestingError {
         version_request: VersionRequest,
     },
 
-    /// No known-good version matched the requested selection.
+    /// No release matched the requested version and artifacts on the target platform.
     #[error(
         "no release matching version {version_request} provides {requested_artifacts} downloads for {platform}"
     )]
@@ -526,7 +536,10 @@ pub enum ChromeForTestingError {
         debugger_address: String,
     },
 
-    /// A managed child process could not be terminated, neither gracefully nor by force.
+    /// A managed child process could not be terminated gracefully within its shutdown policy.
+    ///
+    /// The process is then killed. An attachment says whether that succeeded, and a failed kill is
+    /// attached as a child, in which case the process may still be running.
     #[error("failed to terminate {artifact} process {}", .path.display())]
     #[non_exhaustive]
     TerminateProcess {
@@ -572,7 +585,7 @@ pub enum ChromeForTestingError {
     QuitSession,
 
     /// The `WebDriver` session did not answer the quit request within the
-    /// `session_cleanup_timeout` of [`crate::LifecyclePolicy`]; it was abandoned.
+    /// `session_cleanup_timeout` of [`crate::LifecyclePolicy`]. It was abandoned.
     #[error("WebDriver session did not quit within {timeout:?}")]
     #[non_exhaustive]
     QuitSessionTimeout {

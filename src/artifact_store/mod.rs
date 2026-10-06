@@ -123,7 +123,7 @@ impl ArtifactStore {
 
     /// The download and executable of `artifact` in `selected`.
     ///
-    /// The resolver only selects versions providing every requested download; the error guards
+    /// The resolver only selects versions providing every requested download. The error guards
     /// that invariant.
     fn artifact_request(
         &self,
@@ -162,7 +162,7 @@ impl ArtifactStore {
 ///
 /// Installations cancelled because of a sibling failure or caller cancellation only echo that
 /// cause, so their `Cancelled` errors are dropped, keeping only what they carry beneath (e.g. a
-/// failed rollback). Caller cancellation is primary; otherwise the first real failure is.
+/// failed rollback). Caller cancellation is primary, otherwise the first real failure is.
 fn combine_install_errors(
     mut errors: Vec<Report<ChromeForTestingError>>,
     caller_cancelled: bool,

@@ -26,17 +26,17 @@ const OUTPUT_CHANNEL_CAPACITY: usize = 1_024;
 /// Number of most recent output lines retained as history.
 const OUTPUT_HISTORY_LINES: usize = 256;
 
-/// The browser-driver output stream source.
+/// The output stream a [`DriverOutputLine`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DriverOutputSource {
-    /// The browser-driver process stdout stream.
+    /// The `ChromeDriver` process's stdout.
     Stdout,
 
-    /// The browser-driver process stderr stream.
+    /// The `ChromeDriver` process's stderr.
     Stderr,
 }
 
-/// One parsed line from the browser-driver process output.
+/// One line of `ChromeDriver` output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct DriverOutputLine {
@@ -72,19 +72,23 @@ impl fmt::Display for DriverOutputLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum DriverOutputSubscriptionError {
-    /// The subscriber fell behind the bounded output channel.
+    /// The subscriber fell behind the bounded output channel and missed lines. Keep receiving.
     #[error("driver output subscriber lagged by {skipped} lines")]
     Lagged {
         /// Number of lines skipped by the bounded channel.
         skipped: u64,
     },
 
-    /// The `ChromeDriver` output channel has closed.
+    /// Both `ChromeDriver` output streams have ended. No further lines will arrive.
     #[error("driver output channel closed")]
     Closed,
 }
 
 /// A bounded, non-blocking subscription to future `ChromeDriver` output lines.
+///
+/// Obtained from `subscribe_output()` on [`crate::ChromeForTesting`] or
+/// [`crate::ChromeDriverProcess`]. A slow subscriber never backpressures the process: it skips
+/// lines instead and is told how many with [`DriverOutputSubscriptionError::Lagged`].
 pub struct DriverOutputSubscription {
     receiver: broadcast::Receiver<DriverOutputLine>,
 }
@@ -102,9 +106,9 @@ impl DriverOutputSubscription {
     /// # Errors
     ///
     /// Returns [`DriverOutputSubscriptionError::Lagged`] when this subscriber did not keep up with
-    /// the bounded channel. This is recoverable: the subscription continues with the oldest line
+    /// the bounded channel. This is recoverable. The subscription continues with the oldest line
     /// still retained, so keep receiving. Returns [`DriverOutputSubscriptionError::Closed`] once
-    /// both process output streams have ended; no further lines will arrive.
+    /// both process output streams have ended. No further lines will arrive then.
     pub async fn recv(&mut self) -> Result<DriverOutputLine, DriverOutputSubscriptionError> {
         self.receiver.recv().await.map_err(|error| match error {
             broadcast::error::RecvError::Lagged(skipped) => {

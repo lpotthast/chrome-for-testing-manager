@@ -1,16 +1,26 @@
 //! Shared network and lifecycle policies.
 //!
-//! These value types configure several independent subsystems. Aggregate configurations own
-//! them, while resolvers, stores, drivers, and sessions consume only the settings they need.
+//! These value types configure several independent subsystems. The configuration types own them,
+//! and the resolver, artifact store, processes, and sessions read only the settings they need.
 
 use std::time::Duration;
 use tokio_process_tools::GracefulShutdown;
 use typed_builder::TypedBuilder;
 
-/// HTTP connection and request deadlines used by networked services.
+/// HTTP connection and request deadlines.
 ///
-/// The `_timeout` suffix is kept on every field so that the generated builder setters say what
-/// they configure.
+/// Every deadline has a default. The builder offers these setters:
+///
+/// - `connect_timeout`: the TCP connection deadline of every HTTP client (release manifest,
+///   artifact downloads, `ChromeDriver` readiness, `DevTools`, and `WebDriver`). Defaults to 30 s.
+/// - `manifest_timeout`: the overall deadline of a release-manifest request. Defaults to 30 s.
+/// - `artifact_download_timeout`: the overall deadline of one artifact download, including its
+///   response body. Defaults to 15 minutes.
+/// - `webdriver_request_timeout`: the overall deadline of each `WebDriver` request of a managed
+///   session. Defaults to 120 s. It takes the place of `thirtyfour`'s
+///   `WebDriverBuilder::request_timeout`, which has no effect on managed sessions.
+// The `_timeout` suffix is kept on every field so that the generated builder setters say what
+// they configure.
 #[expect(clippy::struct_field_names)]
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct NetworkPolicy {
@@ -65,14 +75,26 @@ impl NetworkPolicy {
     }
 }
 
-/// Process startup, readiness, graceful shutdown, and session cleanup policy.
+/// Process startup, graceful shutdown, and session cleanup timing.
+///
+/// Every setting has a default. The builder offers these setters:
+///
+/// - `graceful_shutdown`: how managed processes are asked to exit before they are killed. Defaults
+///   to `SIGTERM` on Unix and `CTRL_BREAK_EVENT` on Windows, each with 3 s to exit.
+/// - `driver_startup_timeout`: how long `ChromeDriver` may take to announce its port and report
+///   readiness on its `/status` endpoint. Defaults to 10 s.
+/// - `headless_shell_startup_timeout`: how long Chrome Headless Shell may take to expose `DevTools`
+///   and open its initial page. Defaults to 10 s.
+/// - `session_cleanup_timeout`: how long quitting a `WebDriver` session may take during cleanup.
+///   A session that cannot be quit in time is abandoned, and `ChromeDriver` ends it when it
+///   terminates. Defaults to 30 s.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct LifecyclePolicy {
     /// Per-platform graceful-shutdown policy for managed child processes.
     #[builder(default = Self::default_graceful_shutdown())]
     graceful_shutdown: GracefulShutdown,
 
-    /// Maximum time for `ChromeDriver` to expose and confirm its status endpoint.
+    /// Maximum time for `ChromeDriver` to announce its port and report readiness.
     #[builder(default = Duration::from_secs(10))]
     driver_startup_timeout: Duration,
 

@@ -22,11 +22,12 @@ use std::process::ExitStatus;
 
 /// A managed Chrome for Testing environment.
 ///
-/// This handle owns the resolved browser package and its matching `ChromeDriver` process. Dropping
-/// it terminates `ChromeDriver` gracefully in the background of the current Tokio runtime; without
-/// a runtime (for example after it has shut down), the process is killed as a last resort. Drop is
-/// only a fallback; call [`Self::shutdown`] to drive shutdown explicitly and surface any error. No
-/// drop guard can guarantee cleanup after abrupt process termination.
+/// This handle owns the resolved browser package and its matching `ChromeDriver` process. Call
+/// [`Self::shutdown`] to stop it and observe the result. Dropping it is only a fallback: it
+/// terminates `ChromeDriver` gracefully in the background of the current Tokio runtime and returns
+/// before the process has exited. Without a runtime (for example after it has shut down), the
+/// process is killed as a last resort. No drop guard can guarantee cleanup after abrupt process
+/// termination. See the [crate-level cancellation section](crate#cancellation-and-drop-safety).
 ///
 #[cfg_attr(
     feature = "thirtyfour",
@@ -96,17 +97,19 @@ impl ChromeForTesting {
 
     /// Resolve, download, and launch a managed Chrome for Testing environment.
     ///
-    /// Cancellation is opt-in through the config's `cancellation` token; see the
-    /// [crate-level cancellation section](crate#cancellation-and-drop-safety) for what happens
-    /// when this future is dropped.
+    /// The first launch of a version downloads its browser package and `ChromeDriver` into the
+    /// cache. Later launches reuse them. Cancellation is opt-in through the config's
+    /// `cancellation` token. See the
+    /// [crate-level cancellation section](crate#cancellation-and-drop-safety), which also covers
+    /// what happens when this future is dropped.
     ///
     /// # Errors
     ///
     /// Returns [`crate::ChromeForTestingError::Cancelled`] on cancellation,
     /// [`crate::ChromeForTestingError::MissingRuntime`] outside a Tokio runtime, and
     /// [`crate::ChromeForTestingError::UnsupportedPlatform`] on platforms without Chrome for
-    /// Testing builds. Other errors cover preparing the cache
-    /// directory and HTTP clients, version resolution, download, and launching `ChromeDriver`.
+    /// Testing builds. Other errors cover preparing the cache directory and HTTP clients, version
+    /// resolution, download, and launching `ChromeDriver`.
     pub async fn launch(config: ChromeForTestingConfig) -> Result<Self> {
         crate::ensure_runtime()?;
 
@@ -212,9 +215,8 @@ impl ChromeForTesting {
     ///
     /// Cleanups that dropped operations handed to the runtime (e.g. quitting the sessions of
     /// dropped session runs and terminating their Chrome Headless Shells) are awaited first, while
-    /// `ChromeDriver` still runs; see
-    /// [`ChromeForTestingManager::wait_for_background_tasks`]. Each of them is bounded by the
-    /// configured [`crate::LifecyclePolicy`].
+    /// `ChromeDriver` still runs. Each of them is bounded by the configured
+    /// [`crate::LifecyclePolicy`]. See [`ChromeForTestingManager::wait_for_background_tasks`].
     ///
     /// # Errors
     ///

@@ -27,7 +27,7 @@ use tokio::fs;
 /// Directory beneath the cache root holding versions and locks of the current on-disk layout.
 ///
 /// Bump this whenever the layout or the completion marker changes incompatibly. Pre-0.13 releases
-/// stored versions directly in the cache root; those directories are left untouched.
+/// stored versions directly in the cache root. Those directories are left untouched.
 const LAYOUT_DIR: &str = "v1";
 const LOCKS_DIR: &str = ".locks";
 const CACHE_LOCK: &str = "cache.lock";
@@ -41,7 +41,7 @@ const MUTATION_LOCK_ATTEMPTS: u32 = 10;
 const MUTATION_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 /// How often a file-system operation is attempted while Windows reports the entry as locked.
 const LOCKED_ENTRY_ATTEMPTS: u32 = if cfg!(windows) { 8 } else { 1 };
-/// Initial delay between attempts on a locked entry; doubled after every attempt.
+/// Initial delay between attempts on a locked entry, doubled after every attempt.
 const LOCKED_ENTRY_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 /// The cache root chosen by the user, and the layout directory beneath it that holds the cache
@@ -317,7 +317,7 @@ fn unique_entry_name(prefix: &str) -> String {
 
 /// Remove every entry of `dir` whose name starts with `prefix`. A missing `dir` has none.
 ///
-/// An entry that cannot be removed does not stop the removal of the others; the first such error
+/// An entry that cannot be removed does not stop the removal of the others. The first such error
 /// is returned once every entry was attempted.
 pub(crate) async fn remove_entries_with_prefix(dir: &Path, prefix: &str) -> io::Result<()> {
     let mut entries = match fs::read_dir(dir).await {

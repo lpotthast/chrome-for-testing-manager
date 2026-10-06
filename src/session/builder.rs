@@ -63,7 +63,7 @@ impl<'a> SessionBuilder<'a> {
 
     /// Provide a token for cooperative cancellation of this session run.
     ///
-    /// Cancellation interrupts launching a Chrome Headless Shell and the user closure; a
+    /// Cancellation interrupts launching a Chrome Headless Shell and the user closure. A
     /// `WebDriver` connection in flight is completed and then closed. Cleanup itself is not
     /// cancellable. See the [crate-level cancellation section](crate#cancellation-and-drop-safety).
     #[must_use]
@@ -92,11 +92,11 @@ impl<'a> SessionBuilder<'a> {
     /// Provide a closure that configures the [`WebDriverBuilder`] before the session is opened.
     ///
     /// The builder starts out with an HTTP client that bypasses proxies (the driver listens on
-    /// `127.0.0.1`) and applies the `webdriver_request_timeout` of [`crate::NetworkPolicy`]. Because a
-    /// client is supplied, [`WebDriverBuilder::request_timeout`] has no effect; replace the client
-    /// through [`WebDriverBuilder::client`] for other HTTP settings. Repeated calls compose:
-    /// closures run in the order they were added. The configuration also governs the requests
-    /// that quit the session.
+    /// `127.0.0.1`) and applies the `webdriver_request_timeout` of [`crate::NetworkPolicy`].
+    /// Because a client is supplied, [`WebDriverBuilder::request_timeout`] has no effect. Replace
+    /// the client through [`WebDriverBuilder::client`] for other HTTP settings. Repeated calls
+    /// compose: closures run in the order they were added. The configuration also governs the
+    /// requests that quit the session.
     #[must_use]
     pub fn with_config<F>(mut self, f: F) -> Self
     where
@@ -112,20 +112,20 @@ impl<'a> SessionBuilder<'a> {
     /// Cleanup runs regardless of outcome. A panic in the user closure is caught, cleanup is
     /// attempted, and the original panic is always resumed.
     ///
-    /// The closure's error type must be a [`std::error::Error`] or a [`Report`]. To mix
-    /// error types through `?`, return `Result<T, rootcause::Report>`; convert boxed errors
+    /// The closure's error type must be a [`std::error::Error`] or a [`Report`]. To mix error
+    /// types through `?`, return `Result<T, rootcause::Report>`. Convert boxed errors
     /// (`Box<dyn Error + Send + Sync>`) with `rootcause::compat::IntoRootcause::into_rootcause`.
     ///
     /// If cancellation is requested while the `WebDriver` connection is in flight, the connection
     /// is completed, because abandoning it could leave an unreachable server-side session, and the
     /// new session is then closed before cancellation is reported. Cancellation during the user
     /// closure drops its future before cleanup begins. If this future itself is dropped, cleanup
-    /// is handed to the Tokio runtime and runs in the background;
+    /// is handed to the Tokio runtime and runs in the background.
     /// [`crate::ChromeForTesting::shutdown`] waits for it before terminating `ChromeDriver`.
     ///
-    /// Quitting the session waits at most the `session_cleanup_timeout` of [`crate::LifecyclePolicy`]; a
-    /// session that cannot be quit in time is abandoned (`ChromeDriver` ends it when it
-    /// terminates). A Chrome Headless Shell is terminated regardless.
+    /// Quitting the session waits at most the `session_cleanup_timeout` of
+    /// [`crate::LifecyclePolicy`]. A session that cannot be quit in time is abandoned, and
+    /// `ChromeDriver` ends it when it terminates. A Chrome Headless Shell is terminated regardless.
     ///
     /// # Errors
     ///

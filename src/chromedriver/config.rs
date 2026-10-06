@@ -45,6 +45,13 @@ impl ChromeDriverLogLevel {
 ///
 /// This is nested under [`crate::ChromeForTestingConfig`] for the high-level API and can also be
 /// passed directly to [`crate::ChromeForTestingManager::launch_driver`] by lower-level callers.
+/// The builder offers these setters:
+///
+/// - `port`: the port `ChromeDriver` listens on. Accepts anything implementing
+///   `Into<PortRequest>`, such as a `u16` or a [`crate::Port`]. Defaults to
+///   [`PortRequest::Any`], an OS-assigned port, which `0u16` requests as well.
+/// - `log_level`: the verbosity of `ChromeDriver`'s own log output. Defaults to
+///   [`ChromeDriverLogLevel::Info`].
 ///
 /// ```
 /// use chrome_for_testing_manager::ChromeDriverConfig;
@@ -54,8 +61,6 @@ impl ChromeDriverLogLevel {
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct ChromeDriverConfig {
     /// The requested `ChromeDriver` port.
-    ///
-    /// Accepts anything implementing `Into<PortRequest>`, including a bare `u16` and [`crate::Port`].
     #[builder(default = PortRequest::Any, setter(into))]
     port: PortRequest,
 

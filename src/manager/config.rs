@@ -1,20 +1,28 @@
 //! Aggregate configuration for the lower-level manager facade.
 //!
-//! Shared policy types live independently in [`crate::policy`]; this module combines them with
-//! cache-location selection for [`crate::ChromeForTestingManager`].
+//! The policy types live in [`crate::policy`]. This module combines them with the cache location
+//! for [`crate::ChromeForTestingManager`].
 
 use crate::policy::{LifecyclePolicy, NetworkPolicy};
 use std::path::PathBuf;
 use typed_builder::TypedBuilder;
 
-/// Focused configuration for resolver, artifact-store, process, and session services.
+/// Configuration of a [`crate::ChromeForTestingManager`], passed to
+/// [`crate::ChromeForTestingManager::new_with_config`].
+///
+/// Every setting has a default. The builder offers these setters:
+///
+/// - `cache_dir` (or `cache_dir_opt`): the cache root. Defaults to the platform's per-user cache
+///   directory.
+/// - `network`: the [`NetworkPolicy`] with HTTP deadlines.
+/// - `lifecycle`: the [`LifecyclePolicy`] with startup, shutdown, and session-cleanup timing.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct ChromeForTestingManagerConfig {
-    /// Optional cache directory. The platform-specific per-user cache is used when absent.
+    /// The cache root, or `None` for the platform's per-user cache directory.
     #[builder(default, setter(into, strip_option(fallback = cache_dir_opt)))]
     pub(crate) cache_dir: Option<PathBuf>,
 
-    /// HTTP policy shared by networked services.
+    /// HTTP deadlines.
     #[builder(default)]
     pub(crate) network: NetworkPolicy,
 

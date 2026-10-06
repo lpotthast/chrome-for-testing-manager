@@ -8,19 +8,25 @@ use crate::cache::CacheLease;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
-/// Chrome-compatible browser binary to register with `ChromeDriver`.
+/// The browser package to download and run sessions against.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ChromeBinary {
-    /// The regular Chrome for Testing browser package.
+    /// The regular Chrome for Testing browser. This is the default.
     #[default]
     Chrome,
 
-    /// The Chrome Headless Shell package.
+    /// Chrome Headless Shell, a lighter, headless-only build of Chrome.
+    ///
+    /// `ChromeDriver` cannot start it itself. Managed sessions launch it separately and attach
+    /// `ChromeDriver` to it, which limits the capabilities that apply (see
+    /// `SessionBuilder::with_caps`, feature `thirtyfour`).
     ChromeHeadlessShell,
 }
 
-/// Non-empty browser artifact requirement used during version resolution and installation.
+/// The browser packages a version must provide, used during version resolution and installation.
+///
+/// `ChromeDriver` is always required in addition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BrowserArtifactRequest {
@@ -94,7 +100,8 @@ impl From<ChromeBinary> for BrowserArtifactRequest {
 /// modification of already-installed files is not detected beyond an executable size change.
 ///
 /// The hidden cache lease keeps the cache alive for as long as this value or any clone exists, so
-/// [`crate::ChromeForTestingManager::clear_cache`] returns
+/// [`crate::ChromeForTestingManager::clear_cache`] and
+/// [`crate::ChromeForTestingManager::prune_cache`] return
 /// [`crate::ChromeForTestingError::CacheInUse`] instead of invalidating these paths.
 #[derive(Debug, Clone)]
 pub struct LoadedBrowserPackage {

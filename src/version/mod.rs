@@ -1,7 +1,7 @@
 //! Version requests and artifact-aware resolved release descriptions.
 //!
-//! The resolver submodule performs network lookup; the types here record the exact platform and
-//! artifacts later installation steps must honor.
+//! The resolver submodule performs the network lookup. The types here record the exact platform
+//! and artifacts that later installation steps must honor.
 
 pub(crate) mod resolver;
 
@@ -17,8 +17,11 @@ use ::chrome_for_testing::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VersionRequest {
-    /// Uses the latest working version. Might not be stable yet.
-    /// You may want to prefer variant [`VersionRequest::LatestIn`] instead.
+    /// The newest known-good release providing `ChromeDriver` and every requested browser package
+    /// for the target platform.
+    ///
+    /// This is often newer than the Stable channel's release. Prefer [`VersionRequest::LatestIn`]
+    /// to follow a channel.
     Latest,
 
     /// Use the latest release from the given [`Channel`],
@@ -30,7 +33,10 @@ pub enum VersionRequest {
     /// release.
     LatestIn(Channel),
 
-    /// Pin a specific version to use.
+    /// Pin a specific version.
+    ///
+    /// Resolution fails with [`crate::ChromeForTestingError::NoMatchingVersion`] if this version
+    /// lacks a requested download on the target platform.
     Fixed(Version),
 }
 
@@ -87,8 +93,8 @@ impl VersionRequest {
 /// chrome-for-testing release index but not yet downloaded.
 ///
 /// Construct via [`crate::ChromeForTestingManager::resolve_version`]. The selected value records
-/// its non-empty [`crate::BrowserArtifactRequest`], and [`crate::ChromeForTestingManager::download`]
-/// installs exactly that resolved set.
+/// its [`crate::BrowserArtifactRequest`], and [`crate::ChromeForTestingManager::download`] installs
+/// exactly that resolved set.
 #[derive(Debug, Clone)]
 pub struct SelectedVersion {
     pub(crate) channel: Option<Channel>,
@@ -120,7 +126,8 @@ impl SelectedVersion {
         self.platform
     }
 
-    /// The non-empty browser artifact set guaranteed by this resolution.
+    /// The browser packages this resolution guarantees, and that
+    /// [`crate::ChromeForTestingManager::download`] installs.
     #[must_use]
     pub const fn requested_artifacts(&self) -> BrowserArtifactRequest {
         self.requested_artifacts
@@ -159,7 +166,7 @@ impl SelectedVersion {
 /// One release's downloads for the target platform.
 ///
 /// The known-good and per-channel manifests use structurally identical but distinct release
-/// types; both convert into this view, which holds the availability rules in one place.
+/// types. Both convert into this view, which holds the availability rules in one place.
 pub(crate) struct ReleaseDownloads<'a> {
     chrome: Option<&'a Download>,
     chrome_headless_shell: Option<&'a Download>,

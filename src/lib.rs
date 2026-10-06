@@ -4,8 +4,8 @@
 //! [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) release index. It picks the right
 //! `chrome` + `chromedriver` pair for your platform, downloads them into a local cache the first time you ask, spawns
 //! `chromedriver` on a port of your choosing (or one the OS picks), and hands you a managed
-//! [`thirtyfour`](https://docs.rs/thirtyfour) `WebDriver` session. When your test finishes, panics, or is canceled, the
-//! spawned process is terminated and the session closed for you.
+//! [`thirtyfour`](https://docs.rs/thirtyfour) `WebDriver` session. When your test finishes, panics, or is cancelled,
+//! the session is closed and the spawned processes are terminated for you.
 //!
 //! It exists so that browser tests in CI and on developer machines don't depend on whatever Chrome happens to be installed,
 //! and so that bumping the Chrome version under test is one simple change.
@@ -17,13 +17,13 @@
 //! - **Deterministic upgrades.** Pin to a specific `Version`, follow a `Channel` (Stable / Beta / Dev / Canary), or always
 //!   grab the latest. Switching is a one-line change.
 //! - **Port and lifecycle managed for you.** Bind to a fixed port for debugging or let the OS pick one for parallel test
-//!   isolation. A dropped handle terminates its process gracefully in the background of the Tokio runtime; use explicit
+//!   isolation. A dropped handle terminates its process gracefully in the background of the Tokio runtime. Call
 //!   `shutdown().await` when termination and its result must be observed.
 //! - **Ergonomic `thirtyfour` integration.** Run a browser test inside `session().run(|s| ...)` where the `WebDriver`
 //!   session is created, scoped, and torn down automatically. Optional `.with_caps(...)`, `.with_config(...)`, and
 //!   `.with_cancellation(...)` builder steps let you tweak Chrome capabilities, the `WebDriver` client, or cancellation
-//!   without leaving the chain. `thirtyfour` is the default session provider; disabling it keeps lower-level version,
-//!   cache, download, and process management while removing session APIs.
+//!   without leaving the chain. The `thirtyfour` feature is enabled by default. Disabling it removes the session APIs
+//!   and keeps version resolution, caching, downloads, and process management.
 //! - **Observable.** Call `subscribe_output()` for a bounded, non-blocking subscription streaming `chromedriver`
 //!   stdout/stderr lines into your own logging or fixtures, `recent_output()` for the last lines printed since spawn, or
 //!   `subscribe_output_with_history()` for both without missing or duplicating a line. Startup failures carry that recent
@@ -95,19 +95,16 @@
 //! # fn main() {}
 //! ```
 //!
-//! Cancellation is opt-in: pass a `CancellationToken` (re-exported from `tokio-util`) through the config's
-//! `.cancellation(...)` setter or `SessionBuilder::with_cancellation(...)`. Cancelled work rolls back cooperatively
-//! (process startup is terminated, an in-flight cache transaction removes its staging, a session callback is dropped and
-//! the session closed) and is reported as `ChromeForTestingError::Cancelled` after cleanup has been drained. What
-//! happens when a future is dropped instead is documented in "Cancellation and drop safety" below. Use
-//! `ChromeForTesting::shutdown().await` when graceful shutdown and its result matter.
+//! Calling `shutdown()` instead of just dropping `chrome` waits for `chromedriver` to exit and reports any failure.
+//! Cancellation is opt-in. See [Cancellation and drop safety](#cancellation-and-drop-safety) below.
 //!
 //! # Configuration
 //!
 //! Anything beyond defaults goes through `ChromeForTestingConfig::builder()`. The `version` setter accepts a `Channel`,
-//! a specific `Version`, or a `VersionRequest`. Shared process and session behavior belongs to `LifecyclePolicy`;
-//! technical driver settings are grouped in `ChromeDriverConfig`, whose `port` setter accepts a `u16`, a `Port`, or a
-//! `PortRequest`. Passing `0u16` requests an OS-assigned port.
+//! a specific `Version`, or a `VersionRequest`, and defaults to the latest Stable release. HTTP deadlines belong to
+//! `NetworkPolicy`, and process and session timing (startup deadlines, graceful shutdown, session cleanup) to
+//! `LifecyclePolicy`. Driver settings are grouped in `ChromeDriverConfig`, whose `port` setter accepts a `u16`, a
+//! `Port`, or a `PortRequest`. The port defaults to an OS-assigned one, which `0u16` requests explicitly as well.
 //!
 //! ```rust,no_run
 //! use chrome_for_testing_manager::{
@@ -144,7 +141,7 @@
 //!         loop {
 //!             match driver_output.recv().await {
 //!                 Ok(line) => println!("{line}"),
-//!                 // This subscriber fell behind and missed some lines; it can keep receiving.
+//!                 // This subscriber fell behind and missed some lines. It can keep receiving.
 //!                 Err(DriverOutputSubscriptionError::Lagged { skipped }) => {
 //!                     eprintln!("missed {skipped} chromedriver output lines");
 //!                 }
@@ -166,41 +163,39 @@
 //!
 //! # Managed sessions opt-out
 //!
-//! The `session()` builder providing a `thirtyfour` session, called in the example, is only available because
-//! `chrome-for-testing-manager` enables its `thirtyfour` feature by default.
-//!
-//! If you only want its chrome/chromedriver version resolution, download, and launch orchestration, declare the dependency
-//! as
+//! The `session()` builder used in the example requires the `thirtyfour` feature, which is enabled by default. If you
+//! only need version resolution, downloads, and process management, for example to drive the browser with another
+//! `WebDriver` client, disable the default features:
 //!
 //! ```toml
 //! chrome-for-testing-manager = { version = "0.13", default-features = false }
 //! ```
 //!
-//! instead.
-//!
 //! # Going lower-level
 //!
-//! For most users `ChromeForTesting` is the right entry point. Non-`thirtyfour` `WebDriver` clients can connect through
+//! For most users `ChromeForTesting` is the right entry point. Other `WebDriver` clients can connect through
 //! `driver_port()`. With regular Chrome, they register `browser_executable()` as the browser binary in their session
 //! capabilities. With Chrome Headless Shell, they launch `browser_executable()` with `--remote-debugging-port` themselves
-//! and attach through `goog:chromeOptions.debuggerAddress`, as the managed `thirtyfour` sessions do. If you need finer
-//! control, such as pre-warming the cache without spawning chromedriver or running multiple chromedriver instances off a
-//! single download, reach for `ChromeForTestingManager` directly.
-//! It exposes `resolve_version`, `download` / `download_for`, `launch_driver`, and `prepare_caps` as separate steps.
-//! Resolution takes a non-empty `BrowserArtifactRequest`, so `Latest` is selected only from releases that actually contain
-//! `ChromeDriver` and every requested browser artifact. `download` installs exactly that resolved set, while `download_for`
-//! installs and returns only the `LoadedBrowserPackage` for one specific binary. Each returned `LoadedBrowserPackage` records the selected
-//! binary and both paths while privately retaining a cache lease.
-//! `launch_driver` consumes a `ChromeDriverConfig` and returns `ChromeDriverProcess`, which exposes `port()`, a bounded
-//! non-blocking `subscribe_output()`, `recent_output()`, `subscribe_output_with_history()`, and consuming `terminate()`
-//! without exposing the generic process implementation.
+//! and attach through `goog:chromeOptions.debuggerAddress`, as the managed `thirtyfour` sessions do.
 //!
-//! Installations are cross-process coordinated through typed shared-cache and exclusive-artifact lock guards. Each
-//! artifact is downloaded and validated in a unique same-filesystem staging directory, marked with the executable size,
-//! and atomically renamed into place. Loaded packages and launched driver processes retain a shared
-//! cache lease, so `clear_cache()` and `prune_cache(...)` return the typed `CacheInUse` error instead of deleting active
-//! artifacts. `prune_cache(...)` removes unretained version directories while preserving the lock namespace and unknown
-//! owner files.
+//! For finer control, such as pre-warming the cache without spawning `chromedriver` or running several `chromedriver`
+//! instances off a single download, use `ChromeForTestingManager` directly. It exposes the steps separately:
+//!
+//! - `resolve_version` picks a release providing `ChromeDriver` and every browser package in the given
+//!   `BrowserArtifactRequest`.
+//! - `download` installs exactly the resolved set and returns a `LoadedBrowserPackage` per browser, while
+//!   `download_for` installs a single browser package. A `LoadedBrowserPackage` holds the browser and `ChromeDriver`
+//!   paths and keeps the cache from being cleared while it exists.
+//! - `launch_driver` starts `ChromeDriver` with a `ChromeDriverConfig` and returns a `ChromeDriverProcess`, with
+//!   `port()`, the same output observation methods as `ChromeForTesting`, and a consuming `terminate()`.
+//! - `prepare_caps` (feature `thirtyfour`) builds headless capabilities pointing at the cached browser.
+//! - `wait_for_background_tasks` waits for the cleanups of dropped processes, session runs, and installations.
+//!
+//! Installations are coordinated across processes through a shared cache lock and a per-artifact exclusive lock. Each
+//! artifact is downloaded and validated in a unique staging directory, marked with the executable size, and atomically
+//! renamed into place. Loaded packages and running processes hold a shared cache lease, so `clear_cache()` and
+//! `prune_cache(...)` return `CacheInUse` instead of deleting artifacts in use. Both remove only version directories
+//! and their lock files, keeping unrelated files in a custom cache directory.
 //!
 //! The cache contents live in a layout-versioned directory beneath the cache root, so releases with incompatible on-disk
 //! layouts can share one cache root without replacing each other's packages. Releases before 0.13 stored versions
@@ -222,13 +217,13 @@
 //!   chunk, and its staging directory is removed before its cache locks are released.
 //! - A process that is starting up, and every managed process when its handle is dropped, is
 //!   terminated gracefully in the background, with its configured shutdown policy. Its cache lease
-//!   is held until it has exited.
+//!   is held until it has exited or was killed.
 //! - A `WebDriver` session run hands its cleanup (quitting the session, terminating a Chrome Headless
-//!   Shell) to the Tokio runtime. A session whose handshake was cut off cannot be closed;
+//!   Shell) to the Tokio runtime. A session whose handshake was cut off cannot be closed.
 //!   `ChromeDriver` ends it when it terminates.
 //!
 //! [`ChromeForTesting::shutdown`] (or [`ChromeForTestingManager::wait_for_background_tasks`]) waits
-//! for these background cleanups and reports their failures; they are logged as well. None of them
+//! for these background cleanups and reports their failures, which are logged as well. None of them
 //! survives the Tokio runtime shutting down or the process being killed. A process whose graceful
 //! termination can no longer run, because no runtime is left to drive it, is killed as a last
 //! resort. Prefer explicit cancellation followed by awaiting the operation, and call

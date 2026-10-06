@@ -102,7 +102,7 @@ impl<'a> InstallPlan<'a> {
     /// Cheap metadata validation: the executable must exist as a regular file whose size matches
     /// the completion marker written at install time. Deliberately no content hashing: the marker
     /// is written only after a fully successful extraction, and re-hashing hundreds of megabytes on
-    /// every cache hit would defeat the lock-free fast path. The cache is a per-user directory;
+    /// every cache hit would defeat the lock-free fast path. The cache is a per-user directory, so
     /// this validation detects incomplete installs, not deliberate tampering by an actor who could
     /// equally rewrite the marker.
     ///
@@ -158,7 +158,7 @@ impl ArtifactStore {
     /// Install `request` if present. On failure, cancel the sibling installations sharing
     /// `siblings`, so that a transaction fails fast.
     ///
-    /// The installation runs as a task holding a clone of `cache_lease`; see the module docs.
+    /// The installation runs as a task holding a clone of `cache_lease`. See the module docs.
     pub(super) async fn install_artifact_or_cancel(
         &self,
         version: Version,

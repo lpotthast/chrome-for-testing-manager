@@ -1,7 +1,7 @@
 //! Guarded `ChromeDriver` process lifecycle and readiness detection.
 //!
-//! Processes terminate on drop, retain their package cache lease, and use explicit cleanup paths
-//! for cancellation or startup failure.
+//! Processes terminate on drop, hold their package's cache lease until they exit, and use explicit
+//! cleanup paths for cancellation or startup failure.
 
 use super::output::{DriverOutputLine, DriverOutputSubscription};
 use crate::background::BackgroundTasks;
@@ -28,15 +28,16 @@ const MAX_REPORTED_STATUS_BODY: usize = 1024;
 
 /// An owned, guarded `ChromeDriver` process.
 ///
-/// This type intentionally hides the generic process implementation. It exposes the bound
-/// [`Port`], output observation through [`Self::subscribe_output`] and [`Self::recent_output`],
-/// and explicit consuming termination through [`Self::terminate`]. It retains the shutdown policy
-/// supplied at launch and terminates automatically when dropped.
+/// Returned by [`crate::ChromeForTestingManager::launch_driver`]. It exposes the bound [`Port`],
+/// output observation through [`Self::subscribe_output`] and [`Self::recent_output`], and
+/// consuming termination through [`Self::terminate`], using the shutdown policy supplied at
+/// launch.
 ///
-/// Dropping this value terminates the process gracefully in the background of the current Tokio
-/// runtime; [`crate::ChromeForTestingManager::wait_for_background_tasks`] waits for that and
-/// reports its failure. Without a runtime (for example after it has shut down), the process is
-/// killed as a last resort. Prefer [`Self::terminate`] for observable, error-reporting shutdown.
+/// Prefer [`Self::terminate`] for observable, error-reporting shutdown. Dropping this value
+/// terminates the process gracefully in the background of the current Tokio runtime instead, and
+/// [`crate::ChromeForTestingManager::wait_for_background_tasks`] waits for that and reports its
+/// failure. Without a runtime (for example after it has shut down), the process is killed as a
+/// last resort.
 #[derive(Debug)]
 pub struct ChromeDriverProcess {
     process: ManagedProcess,
@@ -57,8 +58,9 @@ impl ChromeDriverProcess {
     ///
     /// # Errors
     ///
-    /// Returns an error if the process cannot be terminated within that policy. The process is
-    /// then killed; if even that fails, the error says so and the process may still be running.
+    /// Returns [`crate::ChromeForTestingError::TerminateProcess`] if the process cannot be
+    /// terminated within that policy. The process is then killed. If even that fails, the error
+    /// says so, and the process may still be running.
     pub async fn terminate(self) -> Result<ExitStatus> {
         self.process.terminate().await
     }

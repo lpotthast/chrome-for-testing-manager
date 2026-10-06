@@ -367,8 +367,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unanswered_quit_is_abandoned_at_the_cleanup_deadline() -> Result<(), Report>
-    {
+    async fn unanswered_quit_is_abandoned_at_the_cleanup_deadline() -> Result<(), Report> {
         let new_session =
             br#"{"value":{"sessionId":"fixture-session","capabilities":{}}}"#.to_vec();
         let delete_response = Bytes::from_static(br#"{"value":null}"#);
@@ -389,10 +388,9 @@ mod tests {
             ),
         ]))
         .await?;
-        let driver =
-            thirtyfour::WebDriver::builder(server.url(""), ChromeCapabilities::new())
-                .connect()
-                .await?;
+        let driver = thirtyfour::WebDriver::builder(server.url(""), ChromeCapabilities::new())
+            .connect()
+            .await?;
         let started = Instant::now();
 
         let error = SessionResources {
@@ -425,8 +423,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancellation_during_webdriver_connection_closes_new_session()
-    -> Result<(), Report> {
+    async fn cancellation_during_webdriver_connection_closes_new_session() -> Result<(), Report> {
         let directory = TestDirectory::new("webdriver-connect-cancellation")?;
         let new_session =
             br#"{"value":{"sessionId":"fixture-session","capabilities":{}}}"#.to_vec();
@@ -524,8 +521,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn synchronous_callback_panic_is_caught_and_cleanup_awaited()
-    -> Result<(), Report> {
+    async fn synchronous_callback_panic_is_caught_and_cleanup_awaited() -> Result<(), Report> {
         use futures::FutureExt;
 
         let directory = TestDirectory::new("session-synchronous-panic")?;

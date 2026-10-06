@@ -59,10 +59,7 @@ impl NetworkPolicy {
     }
 
     /// Return the per-request deadline of managed `WebDriver` sessions.
-    #[cfg_attr(
-        not(feature = "thirtyfour"),
-        expect(dead_code, reason = "session-only setting")
-    )]
+    #[cfg(feature = "thirtyfour")]
     pub(crate) const fn webdriver_request_timeout(&self) -> Duration {
         self.webdriver_request_timeout
     }
@@ -117,19 +114,13 @@ impl LifecyclePolicy {
     }
 
     /// Return the Chrome Headless Shell startup deadline.
-    #[cfg_attr(
-        not(feature = "thirtyfour"),
-        expect(dead_code, reason = "session-only setting")
-    )]
+    #[cfg(feature = "thirtyfour")]
     pub(crate) const fn headless_shell_startup_timeout(&self) -> Duration {
         self.headless_shell_startup_timeout
     }
 
     /// Return the deadline for quitting a `WebDriver` session during cleanup.
-    #[cfg_attr(
-        not(feature = "thirtyfour"),
-        expect(dead_code, reason = "session-only setting")
-    )]
+    #[cfg(feature = "thirtyfour")]
     pub(crate) const fn session_cleanup_timeout(&self) -> Duration {
         self.session_cleanup_timeout
     }

@@ -132,6 +132,7 @@ impl FixtureServer {
             .expect("fixture server address is a valid URL")
     }
 
+    #[cfg(unix)]
     pub(crate) fn port(&self) -> u16 {
         self.address.port()
     }

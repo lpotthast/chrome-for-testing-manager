@@ -232,18 +232,19 @@ impl ChromeDriverProcess {
 #[cfg(test)]
 mod tests {
     use super::ChromeDriverProcess;
-    use crate::cache::{CacheDir, CacheLease};
-    use crate::policy::LifecyclePolicy;
-    #[cfg(unix)]
-    use crate::test_support::write_executable;
-    use crate::test_support::{FixtureServer, ResponseSpec, TestDirectory, cache_lease};
-    use crate::{
-        CancellationToken, ChromeDriverConfig, ChromeDriverLogLevel, ChromeForTestingError,
-        GracefulShutdown,
-    };
+    use crate::{ChromeDriverConfig, ChromeDriverLogLevel};
     use assertr::prelude::*;
-    use std::collections::HashMap;
-    use std::time::Duration;
+    // The process tests below drive fake shell-script executables and therefore only run on Unix.
+    #[cfg(unix)]
+    use crate::{
+        CancellationToken, ChromeForTestingError, GracefulShutdown,
+        cache::{CacheDir, CacheLease},
+        policy::LifecyclePolicy,
+        test_support::{FixtureServer, ResponseSpec, TestDirectory, cache_lease, write_executable},
+    };
+    #[cfg(unix)]
+    use std::{collections::HashMap, time::Duration};
+    #[cfg(unix)]
     use tokio::process::Command;
 
     #[test]
@@ -765,6 +766,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn test_shutdown() -> GracefulShutdown {
         GracefulShutdown::builder()
             .unix_sigterm(Duration::from_secs(2))
@@ -772,20 +774,24 @@ mod tests {
             .build()
     }
 
+    #[cfg(unix)]
     fn test_lifecycle() -> LifecyclePolicy {
         LifecyclePolicy::builder()
             .graceful_shutdown(test_shutdown())
             .build()
     }
 
+    #[cfg(unix)]
     async fn test_cache_lease(directory: &TestDirectory) -> Result<CacheLease, rootcause::Report> {
         Ok(cache_lease(&directory.path().join("cache")).await?)
     }
 
+    #[cfg(unix)]
     fn test_status_client() -> Result<reqwest::Client, rootcause::Report> {
         Ok(reqwest::Client::builder().no_proxy().build()?)
     }
 
+    #[cfg(unix)]
     struct ChromeDriverLaunchRequest {
         executable: std::path::PathBuf,
         cache_lease: CacheLease,
@@ -793,6 +799,7 @@ mod tests {
         cancellation: CancellationToken,
     }
 
+    #[cfg(unix)]
     async fn launch(
         request: ChromeDriverLaunchRequest,
         status_client: &reqwest::Client,

@@ -349,12 +349,15 @@ impl Drop for SessionCleanupGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::facade::ChromeForTesting;
     use crate::test_support::{FixtureServer, ResponseSpec, TestDirectory};
+    #[cfg(unix)]
     use crate::version::SelectedVersion;
+    #[cfg(unix)]
+    use crate::{ChromeBinary, ChromeDriverConfig};
     use crate::{
-        ChromeBinary, ChromeDriverConfig, ChromeForTestingManager, ChromeForTestingManagerConfig,
-        LoadedBrowserPackage, Port,
+        ChromeForTestingManager, ChromeForTestingManagerConfig, LoadedBrowserPackage, Port,
     };
     use assertr::prelude::*;
     use axum::body::Bytes;

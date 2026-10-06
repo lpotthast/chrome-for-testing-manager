@@ -82,7 +82,7 @@ pub struct ChromeForTesting {
 }
 
 impl ChromeForTesting {
-    #[cfg(all(test, feature = "thirtyfour"))]
+    #[cfg(all(test, unix, feature = "thirtyfour"))]
     pub(crate) fn from_test_parts(
         manager: ChromeForTestingManager,
         selected: SelectedVersion,

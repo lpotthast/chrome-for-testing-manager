@@ -59,6 +59,7 @@ async fn interrupted_callbacks_still_close_webdriver_sessions() -> Result<(), Re
         error.current_context(),
         ChromeForTestingError::Cancelled
     ))
+    .with_detail_message(format!("unexpected error: {error:?}"))
     .is_true();
     assert_session_closed(port, &cancelled_session_id, "cancelled").await?;
 

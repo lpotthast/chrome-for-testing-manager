@@ -410,6 +410,7 @@ mod tests {
         Ok(writer.finish()?.into_inner())
     }
 
+    #[cfg(unix)]
     fn assert_not_written(directory: &TestDirectory, escaped: &[&str]) {
         for escaped in escaped {
             assert_that!(directory.path().join(escaped).exists())

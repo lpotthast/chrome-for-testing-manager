@@ -8,6 +8,10 @@ use tokio::task::JoinSet;
 
 mod common;
 
+/// Number of concurrent sessions. Windows CI runners struggle with many Chrome instances starting
+/// at once, so run fewer there.
+const SESSION_COUNT: usize = if cfg!(windows) { 2 } else { 5 };
+
 #[tokio::test(flavor = "multi_thread")]
 async fn multiple_sessions() -> Result<(), Report> {
     tracing_subscriber::fmt().try_init().ok();
@@ -15,7 +19,7 @@ async fn multiple_sessions() -> Result<(), Report> {
     let chrome = Arc::new(ChromeForTesting::launch(common::chrome_config()).await?);
 
     let mut tests = JoinSet::new();
-    for _ in 0..5 {
+    for _ in 0..SESSION_COUNT {
         let chrome = Arc::clone(&chrome);
         tests.spawn(async move {
             chrome

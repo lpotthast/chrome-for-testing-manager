@@ -125,7 +125,16 @@ impl<'a> InstallPlan<'a> {
             Err(error) if incomplete(&error) => return Ok(false),
             Err(error) => return Err(error),
         };
-        let marker = match fs::read_to_string(self.final_package.join(COMPLETION_MARKER)).await {
+        let marker_path = self.final_package.join(COMPLETION_MARKER);
+        // Check the entry type first: Windows reports reading a directory as `PermissionDenied`,
+        // which must not be mistaken for an incomplete package.
+        match fs::metadata(&marker_path).await {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if incomplete(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let marker = match fs::read_to_string(&marker_path).await {
             Ok(marker) => marker,
             Err(error) if incomplete(&error) => return Ok(false),
             Err(error) => return Err(error),

@@ -5,6 +5,7 @@
 
 use crate::ChromeForTestingArtifact;
 use crate::cache::CacheLease;
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
 /// Chrome-compatible browser binary to register with `ChromeDriver`.
@@ -31,6 +32,29 @@ pub enum BrowserArtifactRequest {
 
     /// Require both browser variants and their matching `ChromeDriver`.
     Both,
+}
+
+/// Renders as the package name, e.g. `chrome-headless-shell`.
+impl Display for ChromeBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.artifact().fmt(f)
+    }
+}
+
+/// Renders as the required package names, e.g. `chrome and chrome-headless-shell`.
+impl Display for BrowserArtifactRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Chrome => ChromeBinary::Chrome.fmt(f),
+            Self::ChromeHeadlessShell => ChromeBinary::ChromeHeadlessShell.fmt(f),
+            Self::Both => write!(
+                f,
+                "{} and {}",
+                ChromeBinary::Chrome,
+                ChromeBinary::ChromeHeadlessShell
+            ),
+        }
+    }
 }
 
 impl ChromeBinary {

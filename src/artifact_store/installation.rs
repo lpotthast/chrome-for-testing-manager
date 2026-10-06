@@ -172,15 +172,32 @@ impl ArtifactStore {
         let store = self.clone();
         let cache_lease = cache_lease.clone();
         let cancellation = siblings.clone();
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
         let installation = tokio::spawn(async move {
             let result = store
                 .install_artifact(version, &request, cancellation)
                 .await;
             drop(cache_lease);
-            result
+            if let Err(Err(error)) = result_sender.send(result) {
+                // The installation future was dropped, so nobody receives the rollback's outcome.
+                // A plain cancellation is the expected outcome. Anything else would be lost.
+                let plain_cancellation =
+                    matches!(error.current_context(), ChromeForTestingError::Cancelled)
+                        && error.children().is_empty();
+                if !plain_cancellation {
+                    tracing::warn!(
+                        artifact = %request.artifact,
+                        %version,
+                        %error,
+                        "background rollback of a dropped installation failed"
+                    );
+                }
+            }
         });
         let result = match installation.await {
-            Ok(result) => result,
+            Ok(()) => result_receiver
+                .await
+                .expect("a completed installation task sends its result"),
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             // Only possible while the runtime shuts down.
             Err(error) => {
@@ -253,11 +270,25 @@ impl ArtifactStore {
         let install_result = self
             .install_in_staging(&plan, &staging, &cancellation)
             .await;
-        let cleanup_result = fs::remove_dir_all(&staging)
+        let cleanup_result = cache::retry_while_locked(|| fs::remove_dir_all(&staging))
             .await
-            .or_else(cache::ignore_not_found)
-            .context(ChromeForTestingError::RemoveStaleArtifact { path: staging });
-        operation_result_with_cleanup(install_result, cleanup_result)?;
+            .or_else(cache::ignore_not_found);
+        match (install_result, cleanup_result) {
+            (Ok(()), Err(error)) => {
+                // The package is published already; the leftover only occupies disk space until
+                // the next installation of this artifact or a cache clear removes it.
+                tracing::warn!(
+                    path = %staging.display(),
+                    %error,
+                    "failed to remove the staging directory of an installed package"
+                );
+            }
+            (install_result, cleanup_result) => operation_result_with_cleanup(
+                install_result,
+                cleanup_result
+                    .context(ChromeForTestingError::RemoveStaleArtifact { path: staging }),
+            )?,
+        }
         Ok(plan.final_executable)
     }
 
@@ -292,7 +323,7 @@ impl ArtifactStore {
         .await?;
         // Free the archive's disk space right away. Best effort: the staging cleanup removes it
         // too, but a crash after publication would leave it behind until the cache is cleared.
-        if let Err(error) = fs::remove_file(&archive_path).await {
+        if let Err(error) = cache::retry_while_locked(|| fs::remove_file(&archive_path)).await {
             tracing::debug!(path = %archive_path.display(), %error, "failed to remove extracted archive");
         }
 
@@ -300,11 +331,13 @@ impl ArtifactStore {
         // steps are cheap, so the transaction completes even when cancellation arrives now,
         // making the installed artifact reusable by the next run.
         let staged_executable = unpack_dir.join(plan.request.executable);
+        let missing_executable = || ChromeForTestingError::MissingExtractedExecutable {
+            path: staged_executable.clone(),
+        };
         let executable_metadata = match fs::metadata(&staged_executable).await {
             Ok(metadata) if metadata.is_file() => metadata,
-            _ => bail!(ChromeForTestingError::MissingExtractedExecutable {
-                path: staged_executable,
-            }),
+            Ok(_) => bail!(missing_executable()),
+            Err(error) => return Err(Report::new_sendsync(error).context(missing_executable())),
         };
 
         // Extraction rejects a symlink at the package root and never creates an entry beneath a

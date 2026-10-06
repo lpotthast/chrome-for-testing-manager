@@ -6,7 +6,7 @@
 
 use crate::cache::CacheLease;
 use crate::policy::LifecyclePolicy;
-use crate::process_support::{ManagedProcess, StartupLine, StartupStream};
+use crate::process_support::{ManagedProcess, StartupLine, StartupStream, deadline_after};
 use crate::{
     CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, LoadedBrowserPackage,
     Result,
@@ -15,7 +15,6 @@ use rootcause::{bail, prelude::ResultExt};
 use std::process::ExitStatus;
 use thirtyfour::ChromiumLikeCapabilities;
 use tokio::process::Command;
-use tokio::time::Instant;
 
 const DEFAULT_REMOTE_DEBUGGING_ARG: &str = "--remote-debugging-port=0";
 
@@ -53,6 +52,8 @@ impl HeadlessShellSession {
         lifecycle: &LifecyclePolicy,
         cancellation: &CancellationToken,
     ) -> Result<HeadlessShellSession> {
+        // The guarded shell process terminates on drop by blocking a runtime worker.
+        crate::ensure_multithreaded_runtime()?;
         crate::check_cancelled(cancellation)?;
 
         let executable = loaded.browser_executable();
@@ -73,7 +74,7 @@ impl HeadlessShellSession {
         )?;
 
         let startup_timeout = lifecycle.headless_shell_startup_timeout();
-        let deadline = Instant::now() + startup_timeout;
+        let deadline = deadline_after(startup_timeout);
         let (process, ()) = process
             .start(cancellation, async |process| {
                 let debugger_address = process
@@ -94,7 +95,12 @@ impl HeadlessShellSession {
                         .await?
                         .error_for_status()
                 };
-                match tokio::time::timeout_at(deadline, request).await {
+                let response = tokio::time::timeout_at(deadline, request).await;
+                if !matches!(response, Ok(Ok(_))) {
+                    // A shell that exited after announcing DevTools explains the failure best.
+                    process.ensure_running()?;
+                }
+                match response {
                     Ok(response) => response.map(drop).context_with(page_error)?,
                     Err(_) => {
                         return Err(process.startup_timeout_error(startup_timeout).attach(format!(

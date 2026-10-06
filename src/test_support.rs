@@ -326,6 +326,12 @@ impl FakeChromedriverBinaryBuilder {
         ))
     }
 
+    /// Start a child process that inherits the binary's output and outlives it for a while, the
+    /// way Chrome's helper processes keep a crashed browser's output pipes open.
+    pub(crate) fn spawn_child_holding_output(self) -> Self {
+        self.step("sleep 5 &".to_owned())
+    }
+
     /// Block until terminated.
     pub(crate) fn idle_until_terminated(self) -> Self {
         // Sleeping in the background keeps the binary responsive to signals. Termination signals

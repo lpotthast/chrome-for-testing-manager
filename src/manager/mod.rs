@@ -37,7 +37,7 @@ pub struct ChromeForTestingManager {
     webdriver_client: reqwest::Client,
     /// Cleanups of session runs whose future was dropped, shared by all clones.
     #[cfg(feature = "thirtyfour")]
-    session_cleanups: tokio_util::task::TaskTracker,
+    session_cleanups: crate::session::BackgroundCleanups,
     lifecycle: LifecyclePolicy,
     platform: Platform,
 }
@@ -76,14 +76,15 @@ impl ChromeForTestingManager {
             network,
             lifecycle,
         } = config;
-        let cache_dir = match cache_dir {
-            Some(cache_dir) => CacheDir::create_at(cache_dir)?,
-            None => CacheDir::get_or_create()?,
-        };
+        // Detect the platform first, so that an unsupported one leaves no cache directory behind.
         let platform = Platform::detect().context(ChromeForTestingError::UnsupportedPlatform {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
         })?;
+        let cache_dir = match cache_dir {
+            Some(cache_dir) => CacheDir::create_at(cache_dir)?,
+            None => CacheDir::get_or_create()?,
+        };
         let build_client =
             |builder: reqwest::ClientBuilder, timeout: Duration, purpose: HttpClientPurpose| {
                 builder
@@ -123,7 +124,7 @@ impl ChromeForTestingManager {
             #[cfg(feature = "thirtyfour")]
             webdriver_client,
             #[cfg(feature = "thirtyfour")]
-            session_cleanups: tokio_util::task::TaskTracker::new(),
+            session_cleanups: crate::session::BackgroundCleanups::default(),
             lifecycle,
             platform,
         })
@@ -156,6 +157,7 @@ impl ChromeForTestingManager {
     ///
     /// Returns an error if the cache is in use or its entries cannot be removed.
     pub async fn clear_cache(&self) -> Result<()> {
+        crate::ensure_runtime()?;
         self.artifact_store.cache_dir().clear().await
     }
 
@@ -172,6 +174,7 @@ impl ChromeForTestingManager {
         &self,
         retained_versions: &[chrome_for_testing::Version],
     ) -> Result<CachePruneResult> {
+        crate::ensure_runtime()?;
         self.artifact_store
             .cache_dir()
             .prune(retained_versions)
@@ -190,6 +193,7 @@ impl ChromeForTestingManager {
         requested_artifacts: BrowserArtifactRequest,
         cancellation: CancellationToken,
     ) -> Result<SelectedVersion> {
+        crate::ensure_runtime()?;
         self.resolver
             .resolve(version_selection, requested_artifacts, cancellation)
             .await
@@ -212,6 +216,8 @@ impl ChromeForTestingManager {
         selected: &SelectedVersion,
         cancellation: CancellationToken,
     ) -> Result<Vec<LoadedBrowserPackage>> {
+        crate::ensure_runtime()?;
+        crate::check_cancelled(&cancellation)?;
         let cancellation = cancellation.child_token();
         let _cancel_on_drop = cancellation.clone().drop_guard();
         self.artifact_store
@@ -242,6 +248,8 @@ impl ChromeForTestingManager {
             version: selected.version(),
             platform: selected.platform(),
         };
+        crate::ensure_runtime()?;
+        crate::check_cancelled(&cancellation)?;
         if !selected.requested_artifacts().contains(chrome_binary) {
             return Err(rootcause::report!(not_resolved()));
         }
@@ -324,7 +332,7 @@ impl ChromeForTestingManager {
 
     /// Tracks the background cleanups of dropped session runs.
     #[cfg(feature = "thirtyfour")]
-    pub(crate) const fn session_cleanups(&self) -> &tokio_util::task::TaskTracker {
+    pub(crate) const fn session_cleanups(&self) -> &crate::session::BackgroundCleanups {
         &self.session_cleanups
     }
 
@@ -352,6 +360,70 @@ mod tests {
 
     const KNOWN_GOOD_MANIFEST_PATH: &str =
         "/chrome-for-testing/known-good-versions-with-downloads.json";
+
+    #[test]
+    fn async_operations_report_a_missing_runtime() -> Result<(), Report> {
+        let directory = TestDirectory::new("missing-runtime")?;
+        let manager = test_manager(&directory, Duration::from_secs(5))?;
+
+        let is_missing_runtime = |error: Report<ChromeForTestingError>| {
+            matches!(
+                error.current_context(),
+                ChromeForTestingError::MissingRuntime
+            )
+        };
+        let resolved = futures::executor::block_on(manager.resolve_version(
+            VersionRequest::Latest,
+            BrowserArtifactRequest::Chrome,
+            CancellationToken::new(),
+        ));
+        assert_that!(resolved.is_err_and(is_missing_runtime)).is_true();
+        let cleared = futures::executor::block_on(manager.clear_cache());
+        assert_that!(cleared.is_err_and(is_missing_runtime)).is_true();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pre_cancelled_download_fails_before_touching_the_cache() -> Result<(), Report> {
+        let directory = TestDirectory::new("download-pre-cancelled")?;
+        let server = FixtureServer::start(HashMap::new()).await?;
+        let manager = test_manager(&directory, Duration::from_secs(5))?;
+        let selected = selected_version(&manager, &server);
+        let files_before = files_beneath(directory.path());
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = manager
+            .download(&selected, cancellation)
+            .await
+            .expect_err("a pre-cancelled download must fail");
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::Cancelled
+        ))
+        .is_true();
+        assert_that!(files_beneath(directory.path())).is_equal_to(files_before);
+        Ok(())
+    }
+
+    /// All files beneath `dir`, recursively, sorted.
+    fn files_beneath(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut pending = vec![dir.to_owned()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable test directory") {
+                let path = entry.expect("readable test directory entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_interrupts_stalled_manifest_fetch() -> Result<(), Report> {

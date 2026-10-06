@@ -6,12 +6,13 @@
 use super::output::{DriverOutputLine, DriverOutputSubscription};
 use crate::cache::CacheLease;
 use crate::chromedriver::ChromeDriverConfig;
+use crate::error::attach_child;
 use crate::policy::LifecyclePolicy;
-use crate::process_support::{ManagedProcess, StartupLine, StartupStream};
+use crate::process_support::{ManagedProcess, StartupLine, StartupStream, deadline_after};
 use crate::{
     CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, Port, PortRequest, Result,
 };
-use rootcause::bail;
+use rootcause::{Report, bail, report};
 use std::path::Path;
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -20,6 +21,9 @@ use tokio::time::Instant;
 
 /// Delay between local readiness probes against the `ChromeDriver` status endpoint.
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How much of a not-ready status body to keep for the error report.
+const MAX_REPORTED_STATUS_BODY: usize = 1024;
 
 /// An owned, guarded `ChromeDriver` process.
 ///
@@ -119,7 +123,7 @@ impl ChromeDriverProcess {
             lifecycle.graceful_shutdown().clone(),
         )?;
         let startup_timeout = lifecycle.driver_startup_timeout();
-        let deadline = Instant::now() + startup_timeout;
+        let deadline = deadline_after(startup_timeout);
         let (process, port) = process
             .start(cancellation, async |process| {
                 let reported_port = process
@@ -186,30 +190,50 @@ impl ChromeDriverProcess {
         deadline: Instant,
     ) -> Result<()> {
         let status_url = format!("http://127.0.0.1:{port}/status");
+        // Why the most recent probe did not confirm readiness, reported if startup times out.
+        let mut last_probe_failure: Option<Report> = None;
         loop {
             process.ensure_running()?;
 
             if Instant::now() >= deadline {
-                bail!(ChromeForTestingError::ChromeDriverNotReady {
+                let mut error = report!(ChromeForTestingError::ChromeDriverNotReady {
                     path: process.executable().to_owned(),
                     port,
                     timeout: startup_timeout,
                 });
+                if let Some(probe_failure) = last_probe_failure {
+                    attach_child(&mut error, probe_failure);
+                }
+                return Err(error);
             }
 
             // The deadline must cover the whole probe: a server that sends headers and then
             // stalls the body would otherwise extend startup beyond the configured timeout.
             let probe = async {
-                let response = status_client.get(&status_url).send().await.ok()?;
-                if !response.status().is_success() {
-                    return None;
+                let response = status_client
+                    .get(&status_url)
+                    .send()
+                    .await
+                    .map_err(|error| Report::new_sendsync(error).into_dynamic())?;
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(report!("{status_url} answered with status {status}"));
                 }
-                response.text().await.ok()
+                response
+                    .text()
+                    .await
+                    .map_err(|error| Report::new_sendsync(error).into_dynamic())
             };
-            if let Ok(Some(body)) = tokio::time::timeout_at(deadline, probe).await
-                && Self::webdriver_status_is_ready(&body)
-            {
-                return Ok(());
+            match tokio::time::timeout_at(deadline, probe).await {
+                Ok(Ok(body)) if Self::webdriver_status_is_ready(&body) => return Ok(()),
+                Ok(Ok(body)) => {
+                    let body = truncate_on_char_boundary(&body, MAX_REPORTED_STATUS_BODY);
+                    last_probe_failure =
+                        Some(report!("{status_url} did not report readiness: {body}"));
+                }
+                Ok(Err(probe_failure)) => last_probe_failure = Some(probe_failure),
+                // The deadline passed; the next iteration reports it.
+                Err(_) => {}
             }
 
             tokio::time::sleep_until(deadline.min(Instant::now() + READINESS_POLL_INTERVAL)).await;
@@ -227,6 +251,18 @@ impl ChromeDriverProcess {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     }
+}
+
+/// The longest prefix of `value` of at most `max_len` bytes, not splitting a character.
+fn truncate_on_char_boundary(value: &str, max_len: usize) -> &str {
+    if value.len() <= max_len {
+        return value;
+    }
+    let mut end = max_len;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 #[cfg(test)]
@@ -737,6 +773,160 @@ mod tests {
             .with_detail_message("startup must not wait for its deadline")
             .is_true();
         assert_that!(format!("{error:?}")).contains("[stdout] warming up");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unbounded_startup_timeout_does_not_overflow() -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-unbounded-startup")?;
+        let status_server = FixtureServer::start(HashMap::from([(
+            "/status".to_owned(),
+            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
+        )]))
+        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+        let lifecycle = LifecyclePolicy::builder()
+            .graceful_shutdown(test_shutdown())
+            .driver_startup_timeout(Duration::MAX)
+            .build();
+
+        let process = launch(
+            ChromeDriverLaunchRequest {
+                executable,
+                cache_lease: test_cache_lease(&directory).await?,
+                config: ChromeDriverConfig::default(),
+                cancellation: CancellationToken::new(),
+            },
+            &test_status_client()?,
+            &lifecycle,
+        )
+        .await?;
+        process.terminate().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn not_ready_status_reports_the_last_probe() -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-not-ready-status")?;
+        let status_server = FixtureServer::start(HashMap::from([(
+            "/status".to_owned(),
+            ResponseSpec::body(
+                br#"{"value":{"ready":false,"message":"still warming up"}}"#.to_vec(),
+            ),
+        )]))
+        .await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+        let lifecycle = LifecyclePolicy::builder()
+            .graceful_shutdown(test_shutdown())
+            .driver_startup_timeout(Duration::from_millis(300))
+            .build();
+
+        let error = launch(
+            ChromeDriverLaunchRequest {
+                executable,
+                cache_lease: test_cache_lease(&directory).await?,
+                config: ChromeDriverConfig::default(),
+                cancellation: CancellationToken::new(),
+            },
+            &test_status_client()?,
+            &lifecycle,
+        )
+        .await
+        .expect_err("a driver that never reports readiness must fail startup");
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::ChromeDriverNotReady { .. }
+        ))
+        .is_true();
+        assert_that!(format!("{error:?}")).contains("still warming up");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminated_process_can_be_dropped_outside_a_multithreaded_runtime()
+    -> Result<(), rootcause::Report> {
+        let multi_thread = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let directory = TestDirectory::new("chromedriver-terminate-current-thread")?;
+        let (process, _status_server) = multi_thread.block_on(async {
+            let status_server = FixtureServer::start(HashMap::from([(
+                "/status".to_owned(),
+                ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
+            )]))
+            .await?;
+            let executable = FakeChromedriverBinaryBuilder::new()
+                .announce_port(status_server.port())
+                .idle_until_terminated()
+                .write(directory.path().join("fake-chromedriver"))
+                .await?;
+            let process = launch(
+                ChromeDriverLaunchRequest {
+                    executable,
+                    cache_lease: test_cache_lease(&directory).await?,
+                    config: ChromeDriverConfig::default(),
+                    cancellation: CancellationToken::new(),
+                },
+                &test_status_client()?,
+                &test_lifecycle(),
+            )
+            .await?;
+            Ok::<_, rootcause::Report>((process, status_server))
+        })?;
+
+        // Terminating settles the drop guard, so the handle is dropped without a runtime check.
+        let current_thread = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        current_thread.block_on(process.terminate())?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exit_is_reported_while_a_child_holds_the_output_open() -> Result<(), rootcause::Report>
+    {
+        let directory = TestDirectory::new("chromedriver-exit-output-held")?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .spawn_child_holding_output()
+            .exit(3)
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+        let lifecycle = LifecyclePolicy::builder()
+            .graceful_shutdown(test_shutdown())
+            .driver_startup_timeout(Duration::from_millis(300))
+            .build();
+
+        let error = launch(
+            ChromeDriverLaunchRequest {
+                executable,
+                cache_lease: test_cache_lease(&directory).await?,
+                config: ChromeDriverConfig::default(),
+                cancellation: CancellationToken::new(),
+            },
+            &test_status_client()?,
+            &lifecycle,
+        )
+        .await
+        .expect_err("a process that exits before startup must fail");
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::ExitedDuringStartup { status, .. } if status.code() == Some(3)
+        ))
+        .is_true();
         Ok(())
     }
 

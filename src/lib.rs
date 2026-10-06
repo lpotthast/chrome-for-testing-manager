@@ -220,11 +220,13 @@
 //! Dropping a future instead of cancelling it is handled as well, but less observably:
 //!
 //! - An installation is cancelled and rolls back in the background: its extraction stops at the next
-//!   chunk, and its staging directory is removed before its cache locks are released.
+//!   chunk, and its staging directory is removed before its cache locks are released. A failed
+//!   rollback is logged.
 //! - A process that is starting up, and every managed process when its handle is dropped, is
 //!   terminated synchronously, briefly blocking a runtime worker.
 //! - A `WebDriver` session run hands its cleanup (quitting the session, terminating a Chrome Headless
-//!   Shell) to the Tokio runtime, and [`ChromeForTesting::shutdown`] waits for it. A session whose
+//!   Shell) to the Tokio runtime, and [`ChromeForTesting::shutdown`] waits for it and reports its
+//!   failure. A session whose
 //!   handshake was cut off cannot be closed; `ChromeDriver` ends it when it terminates.
 //!
 //! None of this survives the Tokio runtime shutting down or the process being killed. Prefer explicit
@@ -300,10 +302,15 @@ pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
     Ok(())
 }
 
+/// Return [`ChromeForTestingError::MissingRuntime`] unless a Tokio runtime is active, instead of
+/// letting Tokio or `reqwest` panic.
+pub(crate) fn ensure_runtime() -> Result<tokio::runtime::Handle> {
+    tokio::runtime::Handle::try_current()
+        .map_err(|_| report!(ChromeForTestingError::MissingRuntime))
+}
+
 pub(crate) fn ensure_multithreaded_runtime() -> Result<()> {
-    let handle = tokio::runtime::Handle::try_current()
-        .map_err(|_| report!(ChromeForTestingError::MissingRuntime))?;
-    match handle.runtime_flavor() {
+    match ensure_runtime()?.runtime_flavor() {
         RuntimeFlavor::MultiThread => Ok(()),
         unsupported_flavor => Err(report!(ChromeForTestingError::UnsupportedRuntime {
             runtime_flavor: unsupported_flavor,

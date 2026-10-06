@@ -5,8 +5,8 @@
 //! it exists, so errors, cancellation, panics, and dropped futures all flow through the same
 //! ordered cleanup: quit the session, then terminate the shell.
 
-use super::Session;
 use super::headless_shell::HeadlessShellSession;
+use super::{BackgroundCleanups, Session};
 use crate::browser::{ChromeBinary, LoadedBrowserPackage};
 use crate::error::{attach_child, operation_result_with_cleanup};
 use crate::manager::ChromeForTestingManager;
@@ -17,7 +17,6 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use thirtyfour::prelude::WebDriverError;
 use thirtyfour::{ChromeCapabilities, WebDriverBuilder};
-use tokio_util::task::TaskTracker;
 
 type CapsSetup<'a> =
     Box<dyn FnOnce(&mut ChromeCapabilities) -> Result<(), WebDriverError> + Send + 'a>;
@@ -130,8 +129,10 @@ impl<'a> SessionBuilder<'a> {
     /// # Errors
     ///
     /// Returns [`ChromeForTestingError::Cancelled`] if cancellation is requested and cleanup
-    /// succeeds. Other errors cover capability setup, session creation, the user closure, or
-    /// cleanup. An operation error remains primary when cleanup also fails.
+    /// succeeds, and [`ChromeForTestingError::UnsupportedRuntime`] if a Chrome Headless Shell
+    /// session is run outside a multi-threaded Tokio runtime. Other errors cover capability setup,
+    /// session creation, the user closure, or cleanup. An operation error remains primary when
+    /// cleanup also fails.
     pub async fn run<T, E, F>(self, f: F) -> Result<T, Report<ChromeForTestingError>>
     where
         F: for<'b> AsyncFnOnce(&'b Session) -> Result<T, E>,
@@ -282,10 +283,11 @@ impl SessionResources {
 
 /// Owns [`SessionResources`] until [`Self::cleanup`]. If dropped before (the run future was
 /// dropped, or a setup closure panicked), it hands the cleanup to the Tokio runtime, tracked by
-/// `background_cleanups` so that shutting down the environment can wait for it.
+/// `background_cleanups` so that shutting down the environment can wait for it and report its
+/// failure.
 struct SessionCleanupGuard {
     resources: Option<SessionResources>,
-    background_cleanups: TaskTracker,
+    background_cleanups: BackgroundCleanups,
 }
 
 impl SessionCleanupGuard {
@@ -335,14 +337,8 @@ impl Drop for SessionCleanupGuard {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        self.background_cleanups.spawn_on(
-            async move {
-                if let Err(error) = resources.cleanup().await {
-                    tracing::error!(%error, "failed to clean up dropped browser session");
-                }
-            },
-            &handle,
-        );
+        self.background_cleanups
+            .spawn_on(resources.cleanup(), &handle);
     }
 }
 
@@ -404,7 +400,7 @@ mod tests {
 
         assert_that!(matches!(
             error.current_context(),
-            ChromeForTestingError::QuitSession
+            ChromeForTestingError::QuitSessionTimeout { .. }
         ))
         .is_true();
         assert_that!(started.elapsed() < delete_delay / 2)
@@ -569,6 +565,36 @@ mod tests {
         assert_that!(started.elapsed() >= quit_delay / 2)
             .with_detail_message("shutdown must wait for the background quit to finish")
             .is_true();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_reports_failed_cleanup_of_dropped_session_runs() -> Result<(), Report> {
+        let directory = TestDirectory::new("dropped-session-cleanup-failure")?;
+        // Without quit routes, quitting the session fails with 404.
+        let mut routes = session_routes(Duration::ZERO);
+        routes.remove("/session/fixture-session");
+        routes.remove("/session/fixture-session/");
+        let server = FixtureServer::start(routes).await?;
+        let chrome = fixture_environment(&directory, &server).await?;
+
+        let run = chrome
+            .session()
+            .run(async |_session| -> Result<(), WebDriverError> { std::future::pending().await });
+        let dropped = tokio::time::timeout(Duration::from_millis(200), run).await;
+        assert_that!(dropped.is_err()).is_true();
+
+        let error = chrome
+            .shutdown()
+            .await
+            .expect_err("a failed background cleanup must be reported");
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::DroppedSessionCleanup { failures: 1 }
+        ))
+        .is_true();
+        assert_that!(format!("{error:?}")).contains("QuitSession");
         Ok(())
     }
 

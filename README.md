@@ -226,11 +226,13 @@ flight is completed and the new session closed.
 Dropping a future instead of cancelling it is handled as well, but less observably:
 
 - An installation is cancelled and rolls back in the background: its extraction stops at the next
-  chunk, and its staging directory is removed before its cache locks are released.
+  chunk, and its staging directory is removed before its cache locks are released. A failed
+  rollback is logged.
 - A process that is starting up, and every managed process when its handle is dropped, is
   terminated synchronously, briefly blocking a runtime worker.
 - A `WebDriver` session run hands its cleanup (quitting the session, terminating a Chrome Headless
-  Shell) to the Tokio runtime, and `ChromeForTesting::shutdown` waits for it. A session whose
+  Shell) to the Tokio runtime, and `ChromeForTesting::shutdown` waits for it and reports its
+  failure. A session whose
   handshake was cut off cannot be closed; `ChromeDriver` ends it when it terminates.
 
 None of this survives the Tokio runtime shutting down or the process being killed. Prefer explicit

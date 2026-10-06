@@ -153,8 +153,8 @@ impl ArtifactStore {
 /// Combine the errors of a failed installation transaction.
 ///
 /// Installations cancelled because of a sibling failure or caller cancellation only echo that
-/// cause, so their `Cancelled` errors are dropped. Caller cancellation is primary; otherwise the
-/// first real failure is.
+/// cause, so their `Cancelled` errors are dropped, keeping only what they carry beneath (e.g. a
+/// failed rollback). Caller cancellation is primary; otherwise the first real failure is.
 fn combine_install_errors(
     mut errors: Vec<Report<ChromeForTestingError>>,
     caller_cancelled: bool,
@@ -166,8 +166,18 @@ fn combine_install_errors(
         Some(index) if !caller_cancelled => errors.remove(index),
         _ => report!(ChromeForTestingError::Cancelled),
     };
-    for error in errors.into_iter().filter(|error| !is_cancelled(error)) {
-        attach_child(&mut primary, error);
+    for mut error in errors {
+        if is_cancelled(&error) {
+            let mut children = Vec::new();
+            while let Some(child) = error.children_mut().pop() {
+                children.push(child);
+            }
+            for child in children.into_iter().rev() {
+                primary.children_mut().push(child);
+            }
+        } else {
+            attach_child(&mut primary, error);
+        }
     }
     primary
 }
@@ -176,8 +186,36 @@ fn combine_install_errors(
 mod tests {
     use super::combine_install_errors;
     use crate::ChromeForTestingError;
+    use crate::error::attach_child;
     use assertr::prelude::*;
     use rootcause::report;
+    use std::path::PathBuf;
+
+    #[test]
+    fn failures_beneath_derivative_cancellations_are_kept() {
+        let mut cancelled_sibling = report!(ChromeForTestingError::Cancelled);
+        attach_child(
+            &mut cancelled_sibling,
+            report!(ChromeForTestingError::RemoveStaleArtifact {
+                path: PathBuf::from("staging"),
+            }),
+        );
+
+        let error = combine_install_errors(
+            vec![
+                report!(ChromeForTestingError::DetermineCacheDir),
+                cancelled_sibling,
+            ],
+            false,
+        );
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::DetermineCacheDir
+        ))
+        .is_true();
+        assert_that!(format!("{error:?}")).contains("RemoveStaleArtifact");
+    }
 
     #[test]
     fn transaction_error_prefers_real_failure_over_derivative_cancellation() {

@@ -228,7 +228,8 @@ impl CacheDir {
 ///
 /// A directory is first renamed to a unique `<trash_prefix>...` sibling and only then deleted, so
 /// an interrupted removal leaves a trash entry behind, never a partial tree at `path`. Callers
-/// remove leftover trash with [`remove_entries_with_prefix`].
+/// remove leftover trash with [`remove_entries_with_prefix`]. Once renamed, `path` is gone, so a
+/// failure to delete the trash is logged instead of returned.
 pub(crate) async fn remove_tree(path: &Path, trash_prefix: &str) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
@@ -250,14 +251,21 @@ pub(crate) async fn remove_tree(path: &Path, trash_prefix: &str) -> io::Result<(
             Err(error) => return Err(error),
         }
     };
-    retry_while_locked(|| fs::remove_dir_all(&trash)).await
+    if let Err(error) = retry_while_locked(|| fs::remove_dir_all(&trash)).await {
+        tracing::warn!(
+            path = %trash.display(),
+            %error,
+            "failed to delete a removed directory; it is retried with the next removal"
+        );
+    }
+    Ok(())
 }
 
 /// Run a file-system operation, retrying with backoff while Windows reports the entry as locked.
 ///
 /// Virus scanners and indexers briefly open freshly written files, which makes renaming or
-/// removing their directory fail with `PermissionDenied` until they let go. Elsewhere, the
-/// operation runs once.
+/// removing their directory fail with an access, sharing, or lock violation until they let go.
+/// Elsewhere, the operation runs once.
 pub(crate) async fn retry_while_locked<T, Fut>(mut operation: impl FnMut() -> Fut) -> io::Result<T>
 where
     Fut: Future<Output = io::Result<T>>,
@@ -266,10 +274,7 @@ where
     let mut attempt = 1;
     loop {
         match operation().await {
-            Err(error)
-                if attempt < LOCKED_ENTRY_ATTEMPTS
-                    && error.kind() == io::ErrorKind::PermissionDenied =>
-            {
+            Err(error) if attempt < LOCKED_ENTRY_ATTEMPTS && is_locked_entry_error(&error) => {
                 tokio::time::sleep(delay).await;
                 delay *= 2;
                 attempt += 1;
@@ -277,6 +282,18 @@ where
             result => return result,
         }
     }
+}
+
+/// Whether `error` reports an entry another process holds open.
+fn is_locked_entry_error(error: &io::Error) -> bool {
+    /// `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`, which `std` maps to no specific
+    /// `io::ErrorKind`.
+    const WINDOWS_SHARING_OR_LOCK_VIOLATION: [i32; 2] = [32, 33];
+    error.kind() == io::ErrorKind::PermissionDenied
+        || (cfg!(windows)
+            && error
+                .raw_os_error()
+                .is_some_and(|code| WINDOWS_SHARING_OR_LOCK_VIOLATION.contains(&code)))
 }
 
 /// Create a new directory in `parent` whose name starts with `prefix` and is unique.

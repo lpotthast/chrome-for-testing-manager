@@ -15,7 +15,7 @@
 use crate::chromedriver::output::{DriverOutputLine, DriverOutputSubscription, OutputCapture};
 use crate::error::{attach_child, operation_result_with_cleanup};
 use crate::{CancellationToken, ChromeForTestingArtifact, ChromeForTestingError, Result};
-use rootcause::{Report, bail, prelude::ResultExt, report};
+use rootcause::{Report, prelude::ResultExt, report};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -44,10 +44,11 @@ type ManagedOutputStream = BroadcastOutputStream<ReliableWithBackpressure, Repla
 
 /// A process handle that terminates its process when dropped.
 ///
-/// Like `tokio_process_tools::TerminateOnDrop`, but disarmable: once termination failed and that
-/// failure was accepted, dropping the handle must not block a runtime worker on yet another
-/// termination attempt. Dropping an armed handle requires an active multithreaded Tokio runtime
-/// and panics otherwise, as does a failed termination during drop.
+/// Like `tokio_process_tools::TerminateOnDrop`, but disarmable: once the process was terminated, or
+/// termination failed and that failure was accepted, dropping the handle must neither block a
+/// runtime worker on yet another termination attempt nor require a runtime. Dropping an armed
+/// handle requires an active multithreaded Tokio runtime and panics otherwise, as does a failed
+/// termination during drop.
 #[derive(Debug)]
 pub(crate) struct ManagedProcessHandle {
     inner: ProcessHandle<ManagedOutputStream>,
@@ -142,6 +143,8 @@ pub(crate) struct ManagedProcess {
     artifact: ChromeForTestingArtifact,
     executable: PathBuf,
     shutdown: GracefulShutdown,
+    /// Why the process state could last not be observed, if it could not.
+    state_error: Option<std::io::Error>,
 }
 
 impl ManagedProcess {
@@ -185,6 +188,7 @@ impl ManagedProcess {
             artifact,
             executable: executable.to_owned(),
             shutdown,
+            state_error: None,
         })
     }
 
@@ -250,6 +254,7 @@ impl ManagedProcess {
             artifact,
             executable,
             shutdown,
+            state_error: _,
         } = self;
         let result =
             Self::terminate_handle(&mut handle, &shutdown, name, artifact, &executable).await;
@@ -269,7 +274,11 @@ impl ManagedProcess {
         executable: &Path,
     ) -> Result<ExitStatus> {
         let terminate_error = match handle.terminate(shutdown.clone()).await {
-            Ok(status) => return Ok(status),
+            Ok(status) => {
+                // The process exited: dropping the handle must not require a runtime anymore.
+                handle.disarm();
+                return Ok(status);
+            }
             Err(error) => error,
         };
         let mut error = Report::new_sendsync(terminate_error).context(
@@ -280,6 +289,7 @@ impl ManagedProcess {
         );
         match tokio::time::timeout(KILL_TIMEOUT, handle.kill()).await {
             Ok(Ok(())) => {
+                handle.disarm();
                 error = error.attach("the process was killed after graceful termination failed");
             }
             Ok(Err(kill_error)) => {
@@ -364,16 +374,24 @@ impl ManagedProcess {
                     })
                 })
             }
-            Ok(WaitForLineResult::Timeout) => Err(self.startup_timeout_error(timeout)),
+            Ok(WaitForLineResult::Timeout) => {
+                // A child process inheriting the output pipe can keep it open after an exit.
+                self.ensure_running()?;
+                Err(self.startup_timeout_error(timeout))
+            }
             Ok(WaitForLineResult::StreamClosed) => {
                 let deadline = Instant::now() + EXIT_OBSERVATION_GRACE;
                 loop {
                     self.ensure_running()?;
                     if Instant::now() >= deadline {
-                        bail!(ChromeForTestingError::StartupOutputClosed {
+                        let mut error = report!(ChromeForTestingError::StartupOutputClosed {
                             artifact: self.artifact,
                             path: self.executable.clone(),
                         });
+                        if let Some(state_error) = self.state_error.take() {
+                            attach_child(&mut error, Report::new_sendsync(state_error));
+                        }
+                        return Err(error);
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -382,6 +400,9 @@ impl ManagedProcess {
     }
 
     /// Return [`ChromeForTestingError::ExitedDuringStartup`] if the process has exited.
+    ///
+    /// A process whose state cannot be observed counts as running; the failure is remembered for
+    /// [`ChromeForTestingError::StartupOutputClosed`].
     pub(crate) fn ensure_running(&mut self) -> Result<()> {
         match self.handle.is_running() {
             RunningState::Running => Ok(()),
@@ -394,6 +415,7 @@ impl ManagedProcess {
             }
             RunningState::Uncertain(error) => {
                 tracing::debug!(process = self.name, %error, "could not determine process state");
+                self.state_error = Some(error);
                 Ok(())
             }
         }
@@ -411,6 +433,14 @@ impl ManagedProcess {
     pub(crate) fn executable(&self) -> &Path {
         &self.executable
     }
+}
+
+/// The instant `timeout` from now, saturating far in the future for huge timeouts such as
+/// [`Duration::MAX`], which callers use to disable a deadline.
+pub(crate) fn deadline_after(timeout: Duration) -> Instant {
+    const FAR_FUTURE: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or_else(|| now + FAR_FUTURE)
 }
 
 /// Render output lines as a report attachment, or `None` if there are none.

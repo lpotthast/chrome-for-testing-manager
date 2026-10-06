@@ -84,8 +84,9 @@ Errors and runtime constraints:
 - All fallible APIs return `rootcause::Report<ChromeForTestingError>` (alias `chrome_for_testing_manager::Result`).
   Use `rootcause::prelude::ResultExt` (`.context(...)`) to attach context; do not return bare error enums. Variants
   covering the same failure for different artifacts are unified with a `ChromeForTestingArtifact` field.
-- `ChromeForTesting::launch` and `launch_driver` assert `RuntimeFlavor::MultiThread` and error with
-  `UnsupportedRuntime` otherwise. Tests must use `#[tokio::test(flavor = "multi_thread")]`.
+- `ChromeForTesting::launch`, `launch_driver`, and Headless Shell session runs assert `RuntimeFlavor::MultiThread`
+  and error with `UnsupportedRuntime` otherwise; every other async API errors with `MissingRuntime` outside a Tokio
+  runtime instead of panicking. Tests must use `#[tokio::test(flavor = "multi_thread")]`.
 
 Feature gate: `thirtyfour` (default; also enables `futures`). Gated items: `Session`, `ChromeForTesting::session`,
 `SessionBuilder`, `ChromeForTestingManager::prepare_caps`.

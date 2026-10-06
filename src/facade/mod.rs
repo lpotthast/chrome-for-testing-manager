@@ -105,8 +105,11 @@ impl ChromeForTesting {
     ///
     /// # Errors
     ///
-    /// Returns an error if the runtime is not multithreaded, resolution or download fails, the
-    /// driver cannot be launched, or the operation is cancelled.
+    /// Returns [`crate::ChromeForTestingError::Cancelled`] on cancellation,
+    /// [`crate::ChromeForTestingError::MissingRuntime`] or [`crate::ChromeForTestingError::UnsupportedRuntime`]
+    /// outside a multi-threaded Tokio runtime, and [`crate::ChromeForTestingError::UnsupportedPlatform`]
+    /// on platforms without Chrome for Testing builds. Other errors cover preparing the cache
+    /// directory and HTTP clients, version resolution, download, and launching `ChromeDriver`.
     pub async fn launch(config: ChromeForTestingConfig) -> Result<Self> {
         crate::ensure_multithreaded_runtime()?;
 
@@ -207,7 +210,8 @@ impl ChromeForTesting {
         self.driver.subscribe_output_with_history()
     }
 
-    /// Gracefully shut down the managed Chrome for Testing environment.
+    /// Gracefully shut down the managed Chrome for Testing environment and return the driver's
+    /// exit status.
     ///
     /// Cleanups that dropped session runs handed to the runtime (quitting their sessions and
     /// terminating their Chrome Headless Shells) are awaited first. Each of them is bounded by the
@@ -215,16 +219,17 @@ impl ChromeForTesting {
     ///
     /// # Errors
     ///
-    /// Returns the driver exit status, or an error if the environment cannot be shut down within
-    /// the configured policy.
+    /// Returns [`crate::ChromeForTestingError::TerminateProcess`] if `ChromeDriver` cannot be terminated,
+    /// and [`crate::ChromeForTestingError::DroppedSessionCleanup`] if a background cleanup of a dropped
+    /// session run failed. A termination failure remains primary when both occur.
     pub async fn shutdown(self) -> Result<ExitStatus> {
         #[cfg(feature = "thirtyfour")]
-        {
-            let session_cleanups = self.manager.session_cleanups();
-            session_cleanups.close();
-            session_cleanups.wait().await;
-        }
-        self.driver.terminate().await
+        let session_cleanup_result = self.manager.session_cleanups().finish().await;
+        let terminate_result = self.driver.terminate().await;
+        #[cfg(feature = "thirtyfour")]
+        let terminate_result =
+            crate::error::operation_result_with_cleanup(terminate_result, session_cleanup_result);
+        terminate_result
     }
 
     /// Start building a scoped `thirtyfour` session against this environment.

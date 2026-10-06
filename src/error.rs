@@ -84,8 +84,8 @@ pub enum ChromeForTestingError {
     Cancelled,
 
     /* Runtime and platform. */
-    /// No Tokio runtime is active on the calling task.
-    #[error("Chrome for Testing requires an active multi-threaded Tokio runtime; none was found")]
+    /// No Tokio runtime is active on the calling task. Every asynchronous operation requires one.
+    #[error("Chrome for Testing requires an active Tokio runtime; none was found")]
     MissingRuntime,
 
     /// The current Tokio runtime is not multi-threaded.
@@ -120,8 +120,11 @@ pub enum ChromeForTestingError {
     },
 
     /* Cache. */
-    /// The cache directory could not be determined.
-    #[error("failed to determine cache directory; is $HOME set?")]
+    /// The platform's per-user cache directory could not be determined.
+    #[error(
+        "failed to determine the per-user cache directory; configure a cache directory explicitly"
+    )]
+    #[non_exhaustive]
     DetermineCacheDir,
 
     /// The cache directory could not be created.
@@ -174,7 +177,7 @@ pub enum ChromeForTestingError {
 
     /* Version resolution. */
     /// The known-good version manifest could not be requested.
-    #[error("failed to request versions for {version_request:?}")]
+    #[error("failed to request the release manifest to resolve version {version_request}")]
     #[non_exhaustive]
     RequestVersions {
         /// The requested version selection.
@@ -183,7 +186,7 @@ pub enum ChromeForTestingError {
 
     /// No known-good version matched the requested selection.
     #[error(
-        "could not determine a version for {version_request:?} on {platform} satisfying {requested_artifacts:?}"
+        "no release matching version {version_request} provides {requested_artifacts} downloads for {platform}"
     )]
     #[non_exhaustive]
     NoMatchingVersion {
@@ -196,7 +199,7 @@ pub enum ChromeForTestingError {
     },
 
     /// A browser package was requested that was not part of the resolved artifact set.
-    #[error("{chrome_binary:?} was not resolved for version {version} on {platform}")]
+    #[error("{chrome_binary} was not resolved for version {version} on {platform}")]
     #[non_exhaustive]
     BrowserArtifactNotResolved {
         /// The browser package requested by the caller.
@@ -551,6 +554,7 @@ pub enum ChromeForTestingError {
 
     /// User-provided capability setup failed.
     #[error("failed to configure Chrome capabilities")]
+    #[non_exhaustive]
     ConfigureSessionCapabilities,
 
     /// The `WebDriver` session could not be started.
@@ -563,12 +567,30 @@ pub enum ChromeForTestingError {
 
     /// User-provided session callback returned an error.
     #[error("session callback failed")]
+    #[non_exhaustive]
     RunSessionCallback,
 
-    /// The `WebDriver` session could not be closed, or did not answer within
-    /// the `session_cleanup_timeout` of [`crate::LifecyclePolicy`].
+    /// The `WebDriver` session could not be closed.
     #[error("failed to quit WebDriver session")]
+    #[non_exhaustive]
     QuitSession,
+
+    /// The `WebDriver` session did not answer the quit request within the
+    /// `session_cleanup_timeout` of [`crate::LifecyclePolicy`]; it was abandoned.
+    #[error("WebDriver session did not quit within {timeout:?}")]
+    #[non_exhaustive]
+    QuitSessionTimeout {
+        /// The session cleanup deadline.
+        timeout: Duration,
+    },
+
+    /// Cleanups that dropped session runs handed to the runtime failed. Each failure is attached.
+    #[error("failed to clean up {failures} dropped session run(s)")]
+    #[non_exhaustive]
+    DroppedSessionCleanup {
+        /// The number of failed cleanups.
+        failures: usize,
+    },
 }
 
 pub(crate) fn operation_result_with_cleanup<T, U>(

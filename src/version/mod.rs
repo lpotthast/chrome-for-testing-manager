@@ -34,6 +34,17 @@ pub enum VersionRequest {
     Fixed(Version),
 }
 
+/// Renders as `latest`, `latest <channel>`, or the pinned version, e.g. `latest Stable`.
+impl std::fmt::Display for VersionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Latest => f.write_str("latest"),
+            Self::LatestIn(channel) => write!(f, "latest {channel}"),
+            Self::Fixed(version) => write!(f, "{version}"),
+        }
+    }
+}
+
 impl From<Channel> for VersionRequest {
     fn from(channel: Channel) -> Self {
         Self::LatestIn(channel)
@@ -210,6 +221,18 @@ mod tests {
 
     mod version_request {
         use super::*;
+
+        #[test]
+        fn display_reads_naturally_in_error_messages() {
+            assert_that!(VersionRequest::Latest.to_string()).is_equal_to("latest");
+            assert_that!(VersionRequest::stable().to_string()).is_equal_to("latest Stable");
+            let version: Version = "135.0.7019.0".parse().expect("valid version literal");
+            assert_that!(VersionRequest::Fixed(version).to_string()).is_equal_to("135.0.7019.0");
+            assert_that!(BrowserArtifactRequest::Both.to_string())
+                .is_equal_to("chrome and chrome-headless-shell");
+            assert_that!(ChromeBinary::ChromeHeadlessShell.to_string())
+                .is_equal_to("chrome-headless-shell");
+        }
 
         #[test]
         fn from_channel_resolves_to_latest_in_channel() {

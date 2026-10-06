@@ -503,6 +503,8 @@ flavor. Most public signatures changed. See "Changed" and "Removed" for migratio
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.13...HEAD
+
 [0.13.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.12.0...v0.13.0
 
 [0.12.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.11.0...v0.12.0

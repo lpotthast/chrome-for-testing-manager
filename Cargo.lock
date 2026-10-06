@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "chrome-for-testing-manager"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "assertr",
  "axum",

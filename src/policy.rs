@@ -82,7 +82,8 @@ impl NetworkPolicy {
 /// - `graceful_shutdown`: how managed processes are asked to exit before they are killed. Defaults
 ///   to `SIGTERM` on Unix and `CTRL_BREAK_EVENT` on Windows, each with 3 s to exit.
 /// - `driver_startup_timeout`: how long `ChromeDriver` may take to announce its port and report
-///   readiness on its `/status` endpoint. Defaults to 10 s.
+///   readiness on its `/status` endpoint, including any retries after a port collision. Defaults
+///   to 10 s.
 /// - `headless_shell_startup_timeout`: how long Chrome Headless Shell may take to expose `DevTools`
 ///   and open its initial page. Defaults to 10 s.
 /// - `session_cleanup_timeout`: how long quitting a `WebDriver` session may take during cleanup.

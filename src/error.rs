@@ -3,7 +3,7 @@
 //! Variants carry the operational evidence needed to understand a failure. Underlying causes and
 //! secondary cleanup failures are attached as `rootcause` report children.
 
-use crate::{BrowserArtifactRequest, ChromeBinary, Port, VersionRequest};
+use crate::{BrowserArtifactRequest, ChromeBinary, Port, PortRequest, VersionRequest};
 use ::chrome_for_testing::{Platform, Version};
 use rootcause::Report;
 use std::{
@@ -464,6 +464,23 @@ pub enum ChromeForTestingError {
         requested: Port,
         /// The port reported by the spawned process.
         reported: Port,
+    },
+
+    /// `ChromeDriver` exited because its port was already in use.
+    ///
+    /// With [`PortRequest::Any`], `ChromeDriver` binds its IPv4 socket to the port the OS assigned
+    /// to its IPv6 socket, and that port may already be in use for IPv4. Such a launch is retried
+    /// with a newly assigned port a few times before this is reported.
+    #[error(
+        "chromedriver {} could not listen on its port because the port is already in use",
+        .path.display()
+    )]
+    #[non_exhaustive]
+    ChromeDriverPortUnavailable {
+        /// The chromedriver executable path.
+        path: PathBuf,
+        /// The port requested from `ChromeDriver`.
+        requested: PortRequest,
     },
 
     /// A managed child process exited before it became ready.

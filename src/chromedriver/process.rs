@@ -26,6 +26,19 @@ const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How much of a not-ready status body to keep for the error report.
 const MAX_REPORTED_STATUS_BODY: usize = 1024;
 
+/// How often a launch on an OS-assigned port is attempted while `ChromeDriver` reports its port as
+/// unavailable. Each attempt gets a newly assigned port, so one collision rarely repeats.
+const PORT_UNAVAILABLE_ATTEMPTS: u32 = 3;
+
+/// The startup line `ChromeDriver` printed.
+enum StartupAnnouncement {
+    /// `ChromeDriver` listens on this port.
+    Listening(Port),
+
+    /// `ChromeDriver` could not listen on its port and exits.
+    PortUnavailable,
+}
+
 /// An owned, guarded `ChromeDriver` process.
 ///
 /// Returned by [`crate::ChromeForTestingManager::launch_driver`]. It exposes the bound [`Port`],
@@ -96,6 +109,11 @@ impl ChromeDriverProcess {
         self.process.subscribe_output_with_history()
     }
 
+    /// Launch `ChromeDriver` and wait until it is ready.
+    ///
+    /// A launch on an OS-assigned port is retried while `ChromeDriver` reports that port as
+    /// unavailable (see [`ChromeForTestingError::ChromeDriverPortUnavailable`]). All attempts share
+    /// one startup deadline.
     pub(crate) async fn launch(
         executable: &Path,
         cache_lease: CacheLease,
@@ -106,46 +124,84 @@ impl ChromeDriverProcess {
         background: &BackgroundTasks,
     ) -> Result<Self> {
         let requested_port = config.port();
-        crate::check_cancelled(cancellation)?;
-
-        tracing::info!(path = %executable.display(), "Launching ChromeDriver.");
-        let process = ManagedProcess::spawn(
-            "chromedriver",
-            ChromeForTestingArtifact::ChromeDriver,
-            executable,
-            Self::command(executable, &config),
-            lifecycle.graceful_shutdown().clone(),
-            cache_lease,
-            background,
-        )?;
+        let attempts = match requested_port {
+            PortRequest::Any => PORT_UNAVAILABLE_ATTEMPTS,
+            PortRequest::Specific(_) => 1,
+        };
         let startup_timeout = lifecycle.driver_startup_timeout();
         let deadline = deadline_after(startup_timeout);
-        let (process, port) = process
-            .start(cancellation, async |process| {
-                let reported_port = process
-                    .wait_for_startup_line(
-                        StartupStream::Stdout,
-                        deadline.saturating_duration_since(Instant::now()),
-                        Self::classify_startup_line,
-                    )
-                    .await?;
-                let port = match requested_port {
-                    PortRequest::Specific(requested) if requested != reported_port => {
-                        bail!(ChromeForTestingError::ChromeDriverPortMismatch {
-                            path: process.executable().to_owned(),
-                            requested,
-                            reported: reported_port,
-                        });
-                    }
-                    PortRequest::Specific(requested) => requested,
-                    PortRequest::Any => reported_port,
-                };
-                Self::probe_status(process, port, status_client, startup_timeout, deadline).await?;
-                Ok(port)
-            })
-            .await?;
+        let mut attempt = 1;
+        loop {
+            crate::check_cancelled(cancellation)?;
 
-        Ok(Self { process, port })
+            tracing::info!(path = %executable.display(), "Launching ChromeDriver.");
+            let process = ManagedProcess::spawn(
+                "chromedriver",
+                ChromeForTestingArtifact::ChromeDriver,
+                executable,
+                Self::command(executable, &config),
+                lifecycle.graceful_shutdown().clone(),
+                cache_lease.clone(),
+                background,
+            )?;
+            let result = process
+                .start(cancellation, async |process| {
+                    let announcement = process
+                        .wait_for_startup_line(
+                            StartupStream::Stdout,
+                            deadline.saturating_duration_since(Instant::now()),
+                            Self::classify_startup_line,
+                        )
+                        .await?;
+                    let reported_port = match announcement {
+                        StartupAnnouncement::Listening(port) => port,
+                        StartupAnnouncement::PortUnavailable => {
+                            bail!(ChromeForTestingError::ChromeDriverPortUnavailable {
+                                path: process.executable().to_owned(),
+                                requested: requested_port,
+                            });
+                        }
+                    };
+                    let port = match requested_port {
+                        PortRequest::Specific(requested) if requested != reported_port => {
+                            bail!(ChromeForTestingError::ChromeDriverPortMismatch {
+                                path: process.executable().to_owned(),
+                                requested,
+                                reported: reported_port,
+                            });
+                        }
+                        PortRequest::Specific(requested) => requested,
+                        PortRequest::Any => reported_port,
+                    };
+                    Self::probe_status(process, port, status_client, startup_timeout, deadline)
+                        .await?;
+                    Ok(port)
+                })
+                .await;
+
+            match result {
+                Ok((process, port)) => return Ok(Self { process, port }),
+                Err(error)
+                    if matches!(
+                        error.current_context(),
+                        ChromeForTestingError::ChromeDriverPortUnavailable { .. }
+                    ) =>
+                {
+                    if attempt == attempts {
+                        if attempts > 1 {
+                            return Err(error.attach(format!("gave up after {attempts} attempts")));
+                        }
+                        return Err(error);
+                    }
+                    tracing::info!(
+                        attempt,
+                        "ChromeDriver could not listen on its OS-assigned port. Retrying."
+                    );
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn command(executable: &Path, config: &ChromeDriverConfig) -> Command {
@@ -159,8 +215,12 @@ impl ChromeDriverProcess {
         command
     }
 
-    /// Recognize `ChromeDriver was started successfully on port <port>.` and parse the port.
-    fn classify_startup_line(line: &str) -> StartupLine<Port> {
+    /// Recognize `ChromeDriver was started successfully on port <port>.`, parsing the port, and
+    /// `IPv4 port not available. Exiting...` (or its `IPv6` counterpart).
+    fn classify_startup_line(line: &str) -> StartupLine<StartupAnnouncement> {
+        if line.contains("port not available") {
+            return StartupLine::Ready(StartupAnnouncement::PortUnavailable);
+        }
         if !line.contains("started successfully on port") {
             return StartupLine::Ignore;
         }
@@ -171,7 +231,9 @@ impl ChromeDriverProcess {
             .next_back()
             .and_then(|value| value.parse::<u16>().ok())
             .and_then(Port::try_new)
-            .map_or(StartupLine::Unrecognized, StartupLine::Ready)
+            .map_or(StartupLine::Unrecognized, |port| {
+                StartupLine::Ready(StartupAnnouncement::Listening(port))
+            })
     }
 
     async fn probe_status(
@@ -258,7 +320,7 @@ mod tests {
     // The process tests below drive fake shell-script executables and therefore only run on Unix.
     #[cfg(unix)]
     use crate::{
-        CancellationToken, ChromeForTestingError, GracefulShutdown,
+        CancellationToken, ChromeForTestingError, GracefulShutdown, PortRequest,
         background::BackgroundTasks,
         cache::{CacheDir, CacheLease},
         policy::LifecyclePolicy,
@@ -572,6 +634,106 @@ mod tests {
         };
         assert_that!(*actual_requested).is_equal_to(requested);
         assert_that!(*actual_reported).is_equal_to(reported);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_os_assigned_port_is_retried() -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-os-assigned-port-retried")?;
+        let status_server = ready_status_server().await?;
+        let counter = directory.path().join("runs");
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .report_port_unavailable_on_first_runs(&counter, 2)
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+
+        let process = launch(
+            default_request(executable, &directory).await?,
+            &test_status_client()?,
+            &test_lifecycle(),
+        )
+        .await?;
+
+        assert_that!(process.port().as_u16()).is_equal_to(status_server.port());
+        assert_that!(read_runs(&counter).await?).is_equal_to(3);
+        process.terminate().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_os_assigned_port_is_reported_after_bounded_attempts()
+    -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-os-assigned-port-unavailable")?;
+        let counter = directory.path().join("runs");
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .report_port_unavailable_on_first_runs(&counter, u32::MAX)
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+
+        let error = launch(
+            default_request(executable, &directory).await?,
+            &test_status_client()?,
+            &test_lifecycle(),
+        )
+        .await
+        .expect_err("a port that stays unavailable must fail startup");
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::ChromeDriverPortUnavailable {
+                requested: PortRequest::Any,
+                ..
+            }
+        ))
+        .is_true();
+        assert_that!(read_runs(&counter).await?).is_equal_to(super::PORT_UNAVAILABLE_ATTEMPTS);
+        assert_that!(format!("{error:?}"))
+            .contains("[stdout] IPv4 port not available. Exiting...")
+            .contains("gave up after 3 attempts");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_fixed_port_is_not_retried() -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-fixed-port-unavailable")?;
+        let status_server = ready_status_server().await?;
+        let requested = crate::Port::new(status_server.port());
+        let counter = directory.path().join("runs");
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .report_port_unavailable_on_first_runs(&counter, 1)
+            .announce_port(requested)
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+
+        let error = launch(
+            ChromeDriverLaunchRequest {
+                executable,
+                cache_lease: test_cache_lease(&directory).await?,
+                config: ChromeDriverConfig::builder().port(requested).build(),
+                cancellation: CancellationToken::new(),
+            },
+            &test_status_client()?,
+            &test_lifecycle(),
+        )
+        .await
+        .expect_err("an unavailable fixed port must fail startup");
+
+        assert_that!(matches!(
+            error.current_context(),
+            ChromeForTestingError::ChromeDriverPortUnavailable {
+                requested: PortRequest::Specific(port),
+                ..
+            } if *port == requested
+        ))
+        .is_true();
+        assert_that!(read_runs(&counter).await?).is_equal_to(1);
         Ok(())
     }
 
@@ -1070,6 +1232,12 @@ mod tests {
             config: ChromeDriverConfig::default(),
             cancellation: CancellationToken::new(),
         })
+    }
+
+    /// How often a fake binary counting its runs in `counter` was run.
+    #[cfg(unix)]
+    async fn read_runs(counter: &std::path::Path) -> Result<u32, rootcause::Report> {
+        Ok(tokio::fs::read_to_string(counter).await?.trim().parse()?)
     }
 
     /// Whether the process `pid` exits (or becomes a zombie) within a few seconds. Blocking, so

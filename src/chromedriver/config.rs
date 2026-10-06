@@ -49,7 +49,9 @@ impl ChromeDriverLogLevel {
 ///
 /// - `port`: the port `ChromeDriver` listens on. Accepts anything implementing
 ///   `Into<PortRequest>`, such as a `u16` or a [`crate::Port`]. Defaults to
-///   [`PortRequest::Any`], an OS-assigned port, which `0u16` requests as well.
+///   [`PortRequest::Any`], an OS-assigned port, which `0u16` requests as well. A launch on an
+///   OS-assigned port that turns out to be in use is retried a few times (see
+///   [`crate::ChromeForTestingError::ChromeDriverPortUnavailable`]).
 /// - `log_level`: the verbosity of `ChromeDriver`'s own log output. Defaults to
 ///   [`ChromeDriverLogLevel::Info`].
 ///

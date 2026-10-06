@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] - 2026-10-06
+
+### Added
+
+- `ChromeForTestingError::ChromeDriverPortUnavailable`, reported when `ChromeDriver` exits because its port is in use.
+  Previously this surfaced as a generic `ExitedDuringStartup`.
+
+### Fixed
+
+- Launching `ChromeDriver` on an OS-assigned port (`PortRequest::Any`, the default) will less frequently fail
+  intermittently with `IPv4 port not available`. `ChromeDriver` binds its IPv4 socket to the port the OS assigned to its
+  IPv6 socket, and that port can already be in use for IPv4. Such a launch is now retried with a new port, up to 3
+  attempts within the driver startup timeout.
+
 ## [0.13.0] - 2026-10-06
 
 This release replaces the high-level `Chromedriver` API with `ChromeForTesting`, adds opt-in cancellation with

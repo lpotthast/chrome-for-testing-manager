@@ -357,6 +357,18 @@ impl FakeChromedriverBinaryBuilder {
         self.step("while :; do sleep 1 & wait $! 2>/dev/null; done".to_owned())
     }
 
+    /// Count the runs of the binary in the file at `counter`, and on each of the first `runs`
+    /// runs, report the port as unavailable and exit with `1`, the way `ChromeDriver` does when
+    /// its port is in use.
+    pub(crate) fn report_port_unavailable_on_first_runs(self, counter: &Path, runs: u32) -> Self {
+        let counter = shell_quote_path(counter);
+        self.step(format!(
+            "runs=$(cat {counter} 2>/dev/null || echo 0); echo $((runs + 1)) > {counter}; \
+             if [ \"$runs\" -lt {runs} ]; then \
+             printf '%s\\n' 'IPv4 port not available. Exiting...'; exit 1; fi"
+        ))
+    }
+
     /// Exit with `code`.
     pub(crate) fn exit(self, code: i32) -> Self {
         self.step(format!("exit {code}"))

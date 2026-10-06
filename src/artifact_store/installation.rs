@@ -173,24 +173,19 @@ impl ArtifactStore {
         let cache_lease = cache_lease.clone();
         let cancellation = siblings.clone();
         let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
-        let installation = tokio::spawn(async move {
+        let installation = self.background.spawn(async move {
             let result = store
                 .install_artifact(version, &request, cancellation)
                 .await;
             drop(cache_lease);
             if let Err(Err(error)) = result_sender.send(result) {
                 // The installation future was dropped, so nobody receives the rollback's outcome.
-                // A plain cancellation is the expected outcome. Anything else would be lost.
-                let plain_cancellation =
-                    matches!(error.current_context(), ChromeForTestingError::Cancelled)
-                        && error.children().is_empty();
-                if !plain_cancellation {
-                    tracing::warn!(
-                        artifact = %request.artifact,
-                        %version,
-                        %error,
-                        "background rollback of a dropped installation failed"
-                    );
+                // A plain cancellation is the expected outcome. Anything else must be reported.
+                if !(super::is_cancelled(&error) && error.children().is_empty()) {
+                    store.background.record_failure(error.attach(format!(
+                        "while rolling back the dropped installation of {} {version}",
+                        request.artifact
+                    )));
                 }
             }
         });

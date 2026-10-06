@@ -12,64 +12,7 @@ use crate::ChromeForTestingError;
 use rootcause::prelude::ResultExt;
 use rootcause::{Report, report};
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio_util::task::TaskTracker;
-
-/// Cleanups that dropped session runs handed to the runtime, and the failures they reported.
-///
-/// Clones share their tasks and failures.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct BackgroundCleanups {
-    tracker: TaskTracker,
-    failures: Arc<Mutex<Vec<Report<ChromeForTestingError>>>>,
-}
-
-impl BackgroundCleanups {
-    /// Run `cleanup` on `runtime`, recording its failure.
-    pub(crate) fn spawn_on(
-        &self,
-        cleanup: impl Future<Output = Result<(), Report<ChromeForTestingError>>> + Send + 'static,
-        runtime: &tokio::runtime::Handle,
-    ) {
-        let failures = Arc::clone(&self.failures);
-        self.tracker.spawn_on(
-            async move {
-                if let Err(error) = cleanup.await {
-                    // Logged as well: the environment may never be shut down explicitly.
-                    tracing::error!(%error, "failed to clean up dropped browser session");
-                    failures
-                        .lock()
-                        .expect("cleanup failure mutex is not poisoned")
-                        .push(error);
-                }
-            },
-            runtime,
-        );
-    }
-
-    /// Stop accepting cleanups, wait for the running ones, and report their failures.
-    pub(crate) async fn finish(&self) -> Result<(), Report<ChromeForTestingError>> {
-        self.tracker.close();
-        self.tracker.wait().await;
-        let failures = std::mem::take(
-            &mut *self
-                .failures
-                .lock()
-                .expect("cleanup failure mutex is not poisoned"),
-        );
-        if failures.is_empty() {
-            return Ok(());
-        }
-        let mut error = report!(ChromeForTestingError::DroppedSessionCleanup {
-            failures: failures.len(),
-        });
-        for failure in failures {
-            crate::error::attach_child(&mut error, failure);
-        }
-        Err(error)
-    }
-}
 
 /// A browser session, handed to the closure of [`SessionBuilder::run`].
 ///

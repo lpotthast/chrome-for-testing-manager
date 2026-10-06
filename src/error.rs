@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
-use tokio::runtime::RuntimeFlavor;
 
 /// Convenience alias for `Result<T, rootcause::Report<ChromeForTestingError>>`.
 ///
@@ -83,23 +82,20 @@ pub enum ChromeForTestingError {
     #[error("operation cancelled")]
     Cancelled,
 
+    /// Cleanups that dropped operations handed to the runtime failed: quitting the sessions of
+    /// dropped session runs, terminating the processes of dropped handles, or rolling back dropped
+    /// installations. Each failure is attached.
+    #[error("{failures} background cleanup(s) of dropped operations failed")]
+    #[non_exhaustive]
+    BackgroundCleanup {
+        /// The number of failed cleanups.
+        failures: usize,
+    },
+
     /* Runtime and platform. */
     /// No Tokio runtime is active on the calling task. Every asynchronous operation requires one.
     #[error("Chrome for Testing requires an active Tokio runtime; none was found")]
     MissingRuntime,
-
-    /// The current Tokio runtime is not multi-threaded.
-    ///
-    /// Guarded processes terminate on drop by blocking a runtime worker, which a current-thread
-    /// runtime cannot provide.
-    #[error(
-        "Chrome for Testing requires a multi-threaded Tokio runtime; detected {runtime_flavor:?}"
-    )]
-    #[non_exhaustive]
-    UnsupportedRuntime {
-        /// The detected runtime flavor.
-        runtime_flavor: RuntimeFlavor,
-    },
 
     /// Chrome for Testing publishes no builds for the current OS and architecture.
     #[error("Chrome for Testing does not support this platform (os: {os}, arch: {arch})")]
@@ -582,14 +578,6 @@ pub enum ChromeForTestingError {
     QuitSessionTimeout {
         /// The session cleanup deadline.
         timeout: Duration,
-    },
-
-    /// Cleanups that dropped session runs handed to the runtime failed. Each failure is attached.
-    #[error("failed to clean up {failures} dropped session run(s)")]
-    #[non_exhaustive]
-    DroppedSessionCleanup {
-        /// The number of failed cleanups.
-        failures: usize,
     },
 }
 

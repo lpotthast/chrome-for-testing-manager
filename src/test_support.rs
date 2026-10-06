@@ -275,7 +275,8 @@ fn contains_transaction_residue_blocking(path: &Path) -> std::io::Result<bool> {
 #[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct FakeChromedriverBinaryBuilder {
-    on_termination: Option<String>,
+    /// Commands run, in order, when terminated, before exiting.
+    on_termination: Vec<String>,
     steps: Vec<String>,
 }
 
@@ -287,7 +288,23 @@ impl FakeChromedriverBinaryBuilder {
 
     /// Print `line` when terminated, before exiting.
     pub(crate) fn on_termination_print(mut self, line: &str) -> Self {
-        self.on_termination = Some(line.to_owned());
+        self.on_termination
+            .push(format!("printf '%s\\n' {}", shell_quote(line)));
+        self
+    }
+
+    /// Create an empty file at `path` when terminated, before exiting, to signal that the binary
+    /// was terminated gracefully rather than killed.
+    pub(crate) fn on_termination_create_file(mut self, path: &Path) -> Self {
+        self.on_termination
+            .push(format!("touch {}", shell_quote_path(path)));
+        self
+    }
+
+    /// Delay exiting by `delay` when terminated.
+    pub(crate) fn on_termination_delay(mut self, delay: std::time::Duration) -> Self {
+        self.on_termination
+            .push(format!("sleep {}", delay.as_secs_f64()));
         self
     }
 
@@ -350,11 +367,9 @@ impl FakeChromedriverBinaryBuilder {
         use std::os::unix::fs::PermissionsExt;
 
         let path = path.into();
-        let on_termination = self
-            .on_termination
-            .map(|line| format!("printf '%s\\n' {}; ", shell_quote(&line)))
-            .unwrap_or_default();
-        let trap = format!("{on_termination}exit 0");
+        let mut trap = self.on_termination;
+        trap.push("exit 0".to_owned());
+        let trap = trap.join("; ");
         let mut script = format!("#!/bin/sh\ntrap {} TERM INT\n", shell_quote(&trap));
         for step in self.steps {
             script.push_str(&step);

@@ -5,8 +5,9 @@
 //! it exists, so errors, cancellation, panics, and dropped futures all flow through the same
 //! ordered cleanup: quit the session, then terminate the shell.
 
+use super::Session;
 use super::headless_shell::HeadlessShellSession;
-use super::{BackgroundCleanups, Session};
+use crate::background::BackgroundTasks;
 use crate::browser::{ChromeBinary, LoadedBrowserPackage};
 use crate::error::{attach_child, operation_result_with_cleanup};
 use crate::manager::ChromeForTestingManager;
@@ -129,10 +130,9 @@ impl<'a> SessionBuilder<'a> {
     /// # Errors
     ///
     /// Returns [`ChromeForTestingError::Cancelled`] if cancellation is requested and cleanup
-    /// succeeds, and [`ChromeForTestingError::UnsupportedRuntime`] if a Chrome Headless Shell
-    /// session is run outside a multi-threaded Tokio runtime. Other errors cover capability setup,
-    /// session creation, the user closure, or cleanup. An operation error remains primary when
-    /// cleanup also fails.
+    /// succeeds, and [`ChromeForTestingError::MissingRuntime`] outside a Tokio runtime. Other
+    /// errors cover capability setup, session creation, the user closure, or cleanup. An
+    /// operation error remains primary when cleanup also fails.
     pub async fn run<T, E, F>(self, f: F) -> Result<T, Report<ChromeForTestingError>>
     where
         F: for<'b> AsyncFnOnce(&'b Session) -> Result<T, E>,
@@ -148,6 +148,7 @@ impl<'a> SessionBuilder<'a> {
             caps_setups,
             config_setups,
         } = self;
+        crate::ensure_runtime()?;
         let cancellation = cancellation.unwrap_or_default();
         crate::check_cancelled(&cancellation)?;
 
@@ -161,7 +162,7 @@ impl<'a> SessionBuilder<'a> {
                 headless_shell: None,
                 cleanup_timeout: manager.lifecycle().session_cleanup_timeout(),
             }),
-            background_cleanups: manager.session_cleanups().clone(),
+            background_tasks: manager.background_tasks().clone(),
         };
         if loaded.chrome_binary() == ChromeBinary::ChromeHeadlessShell {
             resources.get_mut().headless_shell = Some(
@@ -170,6 +171,7 @@ impl<'a> SessionBuilder<'a> {
                     &mut caps,
                     manager.local_client(),
                     manager.lifecycle(),
+                    manager.background_tasks(),
                     &cancellation,
                 )
                 .await?,
@@ -283,11 +285,11 @@ impl SessionResources {
 
 /// Owns [`SessionResources`] until [`Self::cleanup`]. If dropped before (the run future was
 /// dropped, or a setup closure panicked), it hands the cleanup to the Tokio runtime, tracked by
-/// `background_cleanups` so that shutting down the environment can wait for it and report its
+/// `background_tasks` so that shutting down the environment can wait for it and report its
 /// failure.
 struct SessionCleanupGuard {
     resources: Option<SessionResources>,
-    background_cleanups: BackgroundCleanups,
+    background_tasks: BackgroundTasks,
 }
 
 impl SessionCleanupGuard {
@@ -337,8 +339,8 @@ impl Drop for SessionCleanupGuard {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        self.background_cleanups
-            .spawn_on(resources.cleanup(), &handle);
+        self.background_tasks
+            .spawn_cleanup(resources.cleanup(), &handle);
     }
 }
 
@@ -591,7 +593,7 @@ mod tests {
             .expect_err("a failed background cleanup must be reported");
         assert_that!(matches!(
             error.current_context(),
-            ChromeForTestingError::DroppedSessionCleanup { failures: 1 }
+            ChromeForTestingError::BackgroundCleanup { failures: 1 }
         ))
         .is_true();
         assert_that!(format!("{error:?}")).contains("QuitSession");

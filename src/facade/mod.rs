@@ -22,12 +22,11 @@ use std::process::ExitStatus;
 
 /// A managed Chrome for Testing environment.
 ///
-/// This handle owns the resolved browser package and its matching `ChromeDriver` process. Its
-/// process guard attempts termination when dropped inside an active multithreaded Tokio runtime;
-/// dropping it on a thread without one (for example after that runtime has shut down) panics
-/// instead of silently leaking the child process, as does a failed termination during drop. Drop
-/// is only a fallback; call [`Self::shutdown`] to drive shutdown explicitly and surface any error.
-/// No drop guard can guarantee cleanup after abrupt process termination.
+/// This handle owns the resolved browser package and its matching `ChromeDriver` process. Dropping
+/// it terminates `ChromeDriver` gracefully in the background of the current Tokio runtime; without
+/// a runtime (for example after it has shut down), the process is killed as a last resort. Drop is
+/// only a fallback; call [`Self::shutdown`] to drive shutdown explicitly and surface any error. No
+/// drop guard can guarantee cleanup after abrupt process termination.
 ///
 #[cfg_attr(
     feature = "thirtyfour",
@@ -73,8 +72,6 @@ chrome.shutdown().await?;
 )]
 #[derive(Debug)]
 pub struct ChromeForTesting {
-    /// Read only by the feature-gated [`Self::session`]; derived `Debug` does not count as a use.
-    #[cfg_attr(not(feature = "thirtyfour"), expect(dead_code))]
     manager: ChromeForTestingManager,
     selected: SelectedVersion,
     loaded: LoadedBrowserPackage,
@@ -106,12 +103,12 @@ impl ChromeForTesting {
     /// # Errors
     ///
     /// Returns [`crate::ChromeForTestingError::Cancelled`] on cancellation,
-    /// [`crate::ChromeForTestingError::MissingRuntime`] or [`crate::ChromeForTestingError::UnsupportedRuntime`]
-    /// outside a multi-threaded Tokio runtime, and [`crate::ChromeForTestingError::UnsupportedPlatform`]
-    /// on platforms without Chrome for Testing builds. Other errors cover preparing the cache
+    /// [`crate::ChromeForTestingError::MissingRuntime`] outside a Tokio runtime, and
+    /// [`crate::ChromeForTestingError::UnsupportedPlatform`] on platforms without Chrome for
+    /// Testing builds. Other errors cover preparing the cache
     /// directory and HTTP clients, version resolution, download, and launching `ChromeDriver`.
     pub async fn launch(config: ChromeForTestingConfig) -> Result<Self> {
-        crate::ensure_multithreaded_runtime()?;
+        crate::ensure_runtime()?;
 
         let ChromeForTestingConfig {
             version,
@@ -213,23 +210,21 @@ impl ChromeForTesting {
     /// Gracefully shut down the managed Chrome for Testing environment and return the driver's
     /// exit status.
     ///
-    /// Cleanups that dropped session runs handed to the runtime (quitting their sessions and
-    /// terminating their Chrome Headless Shells) are awaited first. Each of them is bounded by the
+    /// Cleanups that dropped operations handed to the runtime (e.g. quitting the sessions of
+    /// dropped session runs and terminating their Chrome Headless Shells) are awaited first, while
+    /// `ChromeDriver` still runs; see
+    /// [`ChromeForTestingManager::wait_for_background_tasks`]. Each of them is bounded by the
     /// configured [`crate::LifecyclePolicy`].
     ///
     /// # Errors
     ///
-    /// Returns [`crate::ChromeForTestingError::TerminateProcess`] if `ChromeDriver` cannot be terminated,
-    /// and [`crate::ChromeForTestingError::DroppedSessionCleanup`] if a background cleanup of a dropped
-    /// session run failed. A termination failure remains primary when both occur.
+    /// Returns [`crate::ChromeForTestingError::TerminateProcess`] if `ChromeDriver` cannot be
+    /// terminated, and [`crate::ChromeForTestingError::BackgroundCleanup`] if a background cleanup
+    /// failed. A termination failure remains primary when both occur.
     pub async fn shutdown(self) -> Result<ExitStatus> {
-        #[cfg(feature = "thirtyfour")]
-        let session_cleanup_result = self.manager.session_cleanups().finish().await;
+        let background_result = self.manager.wait_for_background_tasks().await;
         let terminate_result = self.driver.terminate().await;
-        #[cfg(feature = "thirtyfour")]
-        let terminate_result =
-            crate::error::operation_result_with_cleanup(terminate_result, session_cleanup_result);
-        terminate_result
+        crate::error::operation_result_with_cleanup(terminate_result, background_result)
     }
 
     /// Start building a scoped `thirtyfour` session against this environment.

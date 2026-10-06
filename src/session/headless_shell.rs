@@ -4,7 +4,7 @@
 //! Options it cannot apply to a running browser are rejected, and the shell is terminated only
 //! after `WebDriver` cleanup.
 
-use crate::cache::CacheLease;
+use crate::background::BackgroundTasks;
 use crate::policy::LifecyclePolicy;
 use crate::process_support::{ManagedProcess, StartupLine, StartupStream, deadline_after};
 use crate::{
@@ -21,8 +21,6 @@ const DEFAULT_REMOTE_DEBUGGING_ARG: &str = "--remote-debugging-port=0";
 #[derive(Debug)]
 pub(crate) struct HeadlessShellSession {
     process: ManagedProcess,
-    /// Declared last so that it is released only after the process was dropped.
-    cache_lease: CacheLease,
 }
 
 impl HeadlessShellSession {
@@ -32,13 +30,7 @@ impl HeadlessShellSession {
     }
 
     pub(crate) async fn terminate(self) -> Result<ExitStatus> {
-        let Self {
-            process,
-            cache_lease,
-        } = self;
-        let result = process.terminate().await;
-        drop(cache_lease);
-        result
+        self.process.terminate().await
     }
 
     /// Launch the shell, wait for `DevTools`, open an initial page, and point `caps` at it.
@@ -50,10 +42,9 @@ impl HeadlessShellSession {
         caps: &mut thirtyfour::ChromeCapabilities,
         devtools_client: &reqwest::Client,
         lifecycle: &LifecyclePolicy,
+        background: &BackgroundTasks,
         cancellation: &CancellationToken,
     ) -> Result<HeadlessShellSession> {
-        // The guarded shell process terminates on drop by blocking a runtime worker.
-        crate::ensure_multithreaded_runtime()?;
         crate::check_cancelled(cancellation)?;
 
         let executable = loaded.browser_executable();
@@ -71,6 +62,8 @@ impl HeadlessShellSession {
             executable,
             command,
             lifecycle.graceful_shutdown().clone(),
+            loaded.cache_lease(),
+            background,
         )?;
 
         let startup_timeout = lifecycle.headless_shell_startup_timeout();
@@ -113,10 +106,7 @@ impl HeadlessShellSession {
             })
             .await?;
 
-        Ok(Self {
-            process,
-            cache_lease: loaded.cache_lease(),
-        })
+        Ok(Self { process })
     }
 }
 

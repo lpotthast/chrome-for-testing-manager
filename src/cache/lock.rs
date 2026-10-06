@@ -74,12 +74,14 @@ pub(super) async fn try_mutation_guard(
     Ok(None)
 }
 
-/// Poll the non-blocking lock acquisition until it succeeds or the token is cancelled.
+/// Poll the non-blocking lock acquisition until it succeeds or the token is cancelled. A token
+/// cancelled already fails before the lock file is created.
 async fn wait(
     path: &Path,
     cancellation: &CancellationToken,
     try_lock: fn(&File) -> std::result::Result<(), TryLockError>,
 ) -> Result<File> {
+    crate::check_cancelled(cancellation)?;
     let file = open(path).await?;
     loop {
         crate::check_cancelled(cancellation)?;

@@ -17,7 +17,7 @@
 //! - **Deterministic upgrades.** Pin to a specific `Version`, follow a `Channel` (Stable / Beta / Dev / Canary), or always
 //!   grab the latest. Switching is a one-line change.
 //! - **Port and lifecycle managed for you.** Bind to a fixed port for debugging or let the OS pick one for parallel test
-//!   isolation. A process guard attempts termination on drop while its multithreaded Tokio runtime is active; use explicit
+//!   isolation. A dropped handle terminates its process gracefully in the background of the Tokio runtime; use explicit
 //!   `shutdown().await` when termination and its result must be observed.
 //! - **Ergonomic `thirtyfour` integration.** Run a browser test inside `session().run(|s| ...)` where the `WebDriver`
 //!   session is created, scoped, and torn down automatically. Optional `.with_caps(...)`, `.with_config(...)`, and
@@ -53,8 +53,7 @@
 //! use std::time::Duration;
 //! use thirtyfour::prelude::*;
 //!
-//! // This library requires being used in a multithreaded runtime.
-//! // If you want to run a test, use: `#[tokio::test(flavor = "multi_thread")]`.
+//! // Any Tokio runtime works, e.g. `#[tokio::test]` in tests.
 //! #[tokio::main]
 //! async fn main() -> Result<(), Report> {
 //!     let chrome = ChromeForTesting::launch(Default::default()).await?;
@@ -220,20 +219,23 @@
 //! Dropping a future instead of cancelling it is handled as well, but less observably:
 //!
 //! - An installation is cancelled and rolls back in the background: its extraction stops at the next
-//!   chunk, and its staging directory is removed before its cache locks are released. A failed
-//!   rollback is logged.
+//!   chunk, and its staging directory is removed before its cache locks are released.
 //! - A process that is starting up, and every managed process when its handle is dropped, is
-//!   terminated synchronously, briefly blocking a runtime worker.
+//!   terminated gracefully in the background, with its configured shutdown policy. Its cache lease
+//!   is held until it has exited.
 //! - A `WebDriver` session run hands its cleanup (quitting the session, terminating a Chrome Headless
-//!   Shell) to the Tokio runtime, and [`ChromeForTesting::shutdown`] waits for it and reports its
-//!   failure. A session whose
-//!   handshake was cut off cannot be closed; `ChromeDriver` ends it when it terminates.
+//!   Shell) to the Tokio runtime. A session whose handshake was cut off cannot be closed;
+//!   `ChromeDriver` ends it when it terminates.
 //!
-//! None of this survives the Tokio runtime shutting down or the process being killed. Prefer explicit
-//! cancellation followed by awaiting the operation, and call [`ChromeForTesting::shutdown`] for
-//! observable graceful shutdown.
+//! [`ChromeForTesting::shutdown`] (or [`ChromeForTestingManager::wait_for_background_tasks`]) waits
+//! for these background cleanups and reports their failures; they are logged as well. None of them
+//! survives the Tokio runtime shutting down or the process being killed. A process whose graceful
+//! termination can no longer run, because no runtime is left to drive it, is killed as a last
+//! resort. Prefer explicit cancellation followed by awaiting the operation, and call
+//! [`ChromeForTesting::shutdown`] for observable graceful shutdown.
 
 mod artifact_store;
+mod background;
 mod browser;
 mod cache;
 pub(crate) mod chromedriver;
@@ -269,7 +271,6 @@ use rootcause::report;
 #[cfg(feature = "thirtyfour")]
 pub use session::{Session, SessionBuilder};
 
-use tokio::runtime::RuntimeFlavor;
 pub use tokio_process_tools::{
     GracefulShutdown, GracefulShutdownBuilder, UnixGracefulPhase, UnixGracefulShutdown,
     UnixGracefulSignal, WindowsGracefulShutdown,
@@ -309,23 +310,14 @@ pub(crate) fn ensure_runtime() -> Result<tokio::runtime::Handle> {
         .map_err(|_| report!(ChromeForTestingError::MissingRuntime))
 }
 
-pub(crate) fn ensure_multithreaded_runtime() -> Result<()> {
-    match ensure_runtime()?.runtime_flavor() {
-        RuntimeFlavor::MultiThread => Ok(()),
-        unsupported_flavor => Err(report!(ChromeForTestingError::UnsupportedRuntime {
-            runtime_flavor: unsupported_flavor,
-        })),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use assertr::prelude::*;
 
     #[test]
     fn missing_runtime_is_reported_as_a_typed_error() {
-        let error = super::ensure_multithreaded_runtime()
-            .expect_err("a thread without a Tokio runtime must be rejected");
+        let error =
+            super::ensure_runtime().expect_err("a thread without a Tokio runtime must be rejected");
         assert_that!(matches!(
             error.current_context(),
             super::ChromeForTestingError::MissingRuntime

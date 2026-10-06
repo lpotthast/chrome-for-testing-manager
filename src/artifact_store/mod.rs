@@ -10,6 +10,7 @@ mod installation;
 use self::installation::ArtifactRequest;
 #[cfg(test)]
 pub(crate) use self::installation::COMPLETION_MARKER;
+use crate::background::BackgroundTasks;
 use crate::browser::{BrowserArtifactRequest, ChromeBinary, LoadedBrowserPackage};
 use crate::cache::CacheDir;
 use crate::error::attach_child;
@@ -25,6 +26,8 @@ pub(crate) struct ArtifactStore {
     client: reqwest::Client,
     platform: Platform,
     artifact_timeout: Duration,
+    /// Runs the installations, so that the rollback of a dropped one is awaited and reported.
+    background: BackgroundTasks,
 }
 
 impl ArtifactStore {
@@ -33,12 +36,14 @@ impl ArtifactStore {
         client: reqwest::Client,
         artifact_timeout: Duration,
         platform: Platform,
+        background: BackgroundTasks,
     ) -> Self {
         Self {
             cache_dir,
             client,
             platform,
             artifact_timeout,
+            background,
         }
     }
 
@@ -50,13 +55,16 @@ impl ArtifactStore {
     /// and return one package per requested browser (Chrome before Chrome Headless Shell).
     ///
     /// The artifacts install concurrently under one shared cache lease. A failing installation
-    /// cancels the others, and every installation is drained before this returns.
+    /// cancels the others, and every installation is drained before this returns. Dropping the
+    /// returned future cancels the installations, which then roll back in the background.
     pub(crate) async fn install(
         &self,
         selected: &SelectedVersion,
         requested: BrowserArtifactRequest,
         cancellation: CancellationToken,
     ) -> Result<Vec<LoadedBrowserPackage>> {
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
         if selected.platform() != self.platform {
             return Err(report!(
                 ChromeForTestingError::SelectedVersionPlatformMismatch {
@@ -159,27 +167,25 @@ fn combine_install_errors(
     mut errors: Vec<Report<ChromeForTestingError>>,
     caller_cancelled: bool,
 ) -> Report<ChromeForTestingError> {
-    let is_cancelled = |error: &Report<ChromeForTestingError>| {
-        matches!(error.current_context(), ChromeForTestingError::Cancelled)
-    };
     let mut primary = match errors.iter().position(|error| !is_cancelled(error)) {
         Some(index) if !caller_cancelled => errors.remove(index),
         _ => report!(ChromeForTestingError::Cancelled),
     };
     for mut error in errors {
         if is_cancelled(&error) {
-            let mut children = Vec::new();
-            while let Some(child) = error.children_mut().pop() {
-                children.push(child);
-            }
-            for child in children.into_iter().rev() {
-                primary.children_mut().push(child);
-            }
+            primary
+                .children_mut()
+                .extend(std::mem::take(error.children_mut()));
         } else {
             attach_child(&mut primary, error);
         }
     }
     primary
+}
+
+/// Whether `error` is a cancellation.
+fn is_cancelled(error: &Report<ChromeForTestingError>) -> bool {
+    matches!(error.current_context(), ChromeForTestingError::Cancelled)
 }
 
 #[cfg(test)]

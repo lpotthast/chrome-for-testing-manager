@@ -4,6 +4,7 @@
 //! for cancellation or startup failure.
 
 use super::output::{DriverOutputLine, DriverOutputSubscription};
+use crate::background::BackgroundTasks;
 use crate::cache::CacheLease;
 use crate::chromedriver::ChromeDriverConfig;
 use crate::error::attach_child;
@@ -32,16 +33,14 @@ const MAX_REPORTED_STATUS_BODY: usize = 1024;
 /// and explicit consuming termination through [`Self::terminate`]. It retains the shutdown policy
 /// supplied at launch and terminates automatically when dropped.
 ///
-/// The drop guard requires an active multithreaded Tokio runtime: dropping this value on a thread
-/// without one (for example after the runtime has shut down) panics instead of leaking the child
-/// process. Dropping it also panics, after sending a kill signal, when the process cannot be
-/// terminated. Prefer [`Self::terminate`] for observable, error-reporting shutdown.
+/// Dropping this value terminates the process gracefully in the background of the current Tokio
+/// runtime; [`crate::ChromeForTestingManager::wait_for_background_tasks`] waits for that and
+/// reports its failure. Without a runtime (for example after it has shut down), the process is
+/// killed as a last resort. Prefer [`Self::terminate`] for observable, error-reporting shutdown.
 #[derive(Debug)]
 pub struct ChromeDriverProcess {
     process: ManagedProcess,
     port: Port,
-    /// Declared last so that it is released only after the process was dropped.
-    cache_lease: CacheLease,
 }
 
 impl ChromeDriverProcess {
@@ -61,14 +60,7 @@ impl ChromeDriverProcess {
     /// Returns an error if the process cannot be terminated within that policy. The process is
     /// then killed; if even that fails, the error says so and the process may still be running.
     pub async fn terminate(self) -> Result<ExitStatus> {
-        let Self {
-            process,
-            port: _,
-            cache_lease,
-        } = self;
-        let result = process.terminate().await;
-        drop(cache_lease);
-        result
+        self.process.terminate().await
     }
 
     /// Subscribe to future `ChromeDriver` output without backpressuring the child process.
@@ -109,9 +101,9 @@ impl ChromeDriverProcess {
         cancellation: &CancellationToken,
         status_client: &reqwest::Client,
         lifecycle: &LifecyclePolicy,
+        background: &BackgroundTasks,
     ) -> Result<Self> {
         let requested_port = config.port();
-        crate::ensure_multithreaded_runtime()?;
         crate::check_cancelled(cancellation)?;
 
         tracing::info!(path = %executable.display(), "launching chromedriver");
@@ -121,6 +113,8 @@ impl ChromeDriverProcess {
             executable,
             Self::command(executable, &config),
             lifecycle.graceful_shutdown().clone(),
+            cache_lease,
+            background,
         )?;
         let startup_timeout = lifecycle.driver_startup_timeout();
         let deadline = deadline_after(startup_timeout);
@@ -149,11 +143,7 @@ impl ChromeDriverProcess {
             })
             .await?;
 
-        Ok(Self {
-            process,
-            port,
-            cache_lease,
-        })
+        Ok(Self { process, port })
     }
 
     fn command(executable: &Path, config: &ChromeDriverConfig) -> Command {
@@ -210,19 +200,12 @@ impl ChromeDriverProcess {
             // The deadline must cover the whole probe: a server that sends headers and then
             // stalls the body would otherwise extend startup beyond the configured timeout.
             let probe = async {
-                let response = status_client
-                    .get(&status_url)
-                    .send()
-                    .await
-                    .map_err(|error| Report::new_sendsync(error).into_dynamic())?;
+                let response = status_client.get(&status_url).send().await?;
                 let status = response.status();
                 if !status.is_success() {
                     return Err(report!("{status_url} answered with status {status}"));
                 }
-                response
-                    .text()
-                    .await
-                    .map_err(|error| Report::new_sendsync(error).into_dynamic())
+                Ok::<_, Report>(response.text().await?)
             };
             match tokio::time::timeout_at(deadline, probe).await {
                 Ok(Ok(body)) if Self::webdriver_status_is_ready(&body) => return Ok(()),
@@ -274,6 +257,7 @@ mod tests {
     #[cfg(unix)]
     use crate::{
         CancellationToken, ChromeForTestingError, GracefulShutdown,
+        background::BackgroundTasks,
         cache::{CacheDir, CacheLease},
         policy::LifecyclePolicy,
         test_support::{
@@ -345,11 +329,7 @@ mod tests {
     async fn explicit_termination_keeps_output_subscription_alive() -> Result<(), rootcause::Report>
     {
         let directory = TestDirectory::new("chromedriver-termination-output")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let executable = FakeChromedriverBinaryBuilder::new()
             .on_termination_print("shutdown-complete")
             .announce_port(status_server.port())
@@ -388,11 +368,7 @@ mod tests {
     async fn history_and_subscription_split_output_without_overlap() -> Result<(), rootcause::Report>
     {
         let directory = TestDirectory::new("chromedriver-history-subscription")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let executable = FakeChromedriverBinaryBuilder::new()
             .on_termination_print("shutdown-complete")
             .print_crlf_line("crlf-terminated")
@@ -435,11 +411,7 @@ mod tests {
     async fn fixed_port_uses_status_readiness_and_process_retains_cache_lease()
     -> Result<(), rootcause::Report> {
         let directory = TestDirectory::new("chromedriver-status-readiness")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let executable = FakeChromedriverBinaryBuilder::new()
             .announce_port(status_server.port())
             .idle_until_terminated()
@@ -493,10 +465,7 @@ mod tests {
             .write(directory.path().join("fake-chromedriver"))
             .await?;
         let startup_timeout = Duration::from_millis(300);
-        let lifecycle = LifecyclePolicy::builder()
-            .graceful_shutdown(test_shutdown())
-            .driver_startup_timeout(startup_timeout)
-            .build();
+        let lifecycle = test_lifecycle_with_startup_timeout(startup_timeout);
         let started = std::time::Instant::now();
 
         let error = launch(
@@ -530,19 +499,12 @@ mod tests {
     async fn fixed_port_does_not_accept_an_unrelated_ready_server() -> Result<(), rootcause::Report>
     {
         let directory = TestDirectory::new("chromedriver-fixed-port-attribution")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let executable = FakeChromedriverBinaryBuilder::new()
             .idle_until_terminated()
             .write(directory.path().join("fake-chromedriver"))
             .await?;
-        let lifecycle = LifecyclePolicy::builder()
-            .graceful_shutdown(test_shutdown())
-            .driver_startup_timeout(Duration::from_millis(100))
-            .build();
+        let lifecycle = test_lifecycle_with_startup_timeout(Duration::from_millis(100));
 
         let error = launch(
             ChromeDriverLaunchRequest {
@@ -572,11 +534,7 @@ mod tests {
     async fn fixed_port_rejects_a_different_port_reported_by_the_child()
     -> Result<(), rootcause::Report> {
         let directory = TestDirectory::new("chromedriver-fixed-port-mismatch")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let requested = crate::Port::new(status_server.port());
         let reported = crate::Port::new(if status_server.port() == u16::MAX {
             u16::MAX - 1
@@ -678,11 +636,7 @@ mod tests {
     async fn subscriptions_close_when_the_driver_exits_on_its_own() -> Result<(), rootcause::Report>
     {
         let directory = TestDirectory::new("chromedriver-self-exit-output")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let release = directory.path().join("release");
         let executable = FakeChromedriverBinaryBuilder::new()
             .announce_port(status_server.port())
@@ -745,10 +699,7 @@ mod tests {
             .idle_until_terminated()
             .write(directory.path().join("fake-chromedriver"))
             .await?;
-        let lifecycle = LifecyclePolicy::builder()
-            .graceful_shutdown(test_shutdown())
-            .driver_startup_timeout(Duration::from_secs(30))
-            .build();
+        let lifecycle = test_lifecycle_with_startup_timeout(Duration::from_secs(30));
         let started = std::time::Instant::now();
 
         let error = launch(
@@ -780,20 +731,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unbounded_startup_timeout_does_not_overflow() -> Result<(), rootcause::Report> {
         let directory = TestDirectory::new("chromedriver-unbounded-startup")?;
-        let status_server = FixtureServer::start(HashMap::from([(
-            "/status".to_owned(),
-            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-        )]))
-        .await?;
+        let status_server = ready_status_server().await?;
         let executable = FakeChromedriverBinaryBuilder::new()
             .announce_port(status_server.port())
             .idle_until_terminated()
             .write(directory.path().join("fake-chromedriver"))
             .await?;
-        let lifecycle = LifecyclePolicy::builder()
-            .graceful_shutdown(test_shutdown())
-            .driver_startup_timeout(Duration::MAX)
-            .build();
+        let lifecycle = test_lifecycle_with_startup_timeout(Duration::MAX);
 
         let process = launch(
             ChromeDriverLaunchRequest {
@@ -826,10 +770,7 @@ mod tests {
             .idle_until_terminated()
             .write(directory.path().join("fake-chromedriver"))
             .await?;
-        let lifecycle = LifecyclePolicy::builder()
-            .graceful_shutdown(test_shutdown())
-            .driver_startup_timeout(Duration::from_millis(300))
-            .build();
+        let lifecycle = test_lifecycle_with_startup_timeout(Duration::from_millis(300));
 
         let error = launch(
             ChromeDriverLaunchRequest {
@@ -854,43 +795,151 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn terminated_process_can_be_dropped_outside_a_multithreaded_runtime()
+    #[tokio::test]
+    async fn dropped_process_is_terminated_gracefully_in_the_background()
     -> Result<(), rootcause::Report> {
-        let multi_thread = tokio::runtime::Builder::new_multi_thread()
+        let directory = TestDirectory::new("chromedriver-drop-graceful")?;
+        let terminated_file = directory.path().join("terminated");
+        let status_server = ready_status_server().await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .on_termination_create_file(&terminated_file)
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+        let background = BackgroundTasks::default();
+        let process = launch_tracked(
+            default_request(executable, &directory).await?,
+            &test_status_client()?,
+            &test_lifecycle(),
+            &background,
+        )
+        .await?;
+
+        drop(process);
+        background.wait().await?;
+
+        assert_that!(terminated_file.exists()).is_true();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_process_holds_its_cache_lease_until_terminated()
+    -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-drop-lease")?;
+        let status_server = ready_status_server().await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .on_termination_delay(Duration::from_millis(500))
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+        let background = BackgroundTasks::default();
+        let process = launch_tracked(
+            default_request(executable, &directory).await?,
+            &test_status_client()?,
+            &test_lifecycle(),
+            &background,
+        )
+        .await?;
+        let cache = CacheDir::create_at(directory.path().join("cache"))?;
+
+        drop(process);
+        let cleared_while_terminating = cache.clear().await;
+        background.wait().await?;
+        let cleared_after_termination = cache.clear().await;
+
+        assert_that!(cleared_while_terminating.is_err_and(|error| matches!(
+            error.current_context(),
+            ChromeForTestingError::CacheInUse { .. }
+        )))
+        .is_true();
+        assert_that!(cleared_after_termination.is_ok()).is_true();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_process_is_killed_without_a_runtime() -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-drop-without-runtime")?;
+        let pid_file = directory.path().join("pid");
+        let terminated_file = directory.path().join("terminated");
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let directory = TestDirectory::new("chromedriver-terminate-current-thread")?;
-        let (process, _status_server) = multi_thread.block_on(async {
-            let status_server = FixtureServer::start(HashMap::from([(
-                "/status".to_owned(),
-                ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
-            )]))
-            .await?;
+        let process = runtime.block_on(async {
+            let status_server = ready_status_server().await?;
             let executable = FakeChromedriverBinaryBuilder::new()
+                .record_pid(&pid_file)
+                .on_termination_create_file(&terminated_file)
+                .announce_port(status_server.port())
+                .idle_until_terminated()
+                .write(directory.path().join("fake-chromedriver"))
+                .await?;
+            Ok::<_, rootcause::Report>(
+                launch(
+                    default_request(executable, &directory).await?,
+                    &test_status_client()?,
+                    &test_lifecycle(),
+                )
+                .await?,
+            )
+        })?;
+        drop(runtime);
+
+        drop(process);
+
+        let pid = std::fs::read_to_string(&pid_file)?;
+        assert_that!(wait_until_gone(pid.trim()))
+            .with_detail_message("dropped process remained alive")
+            .is_true();
+        assert_that!(terminated_file.exists())
+            .with_detail_message("the process must be killed, not terminated gracefully")
+            .is_false();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_process_is_killed_when_the_runtime_shuts_down_before_terminating_it()
+    -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-drop-runtime-shutdown")?;
+        let pid_file = directory.path().join("pid");
+        let terminated_file = directory.path().join("terminated");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let status_server = ready_status_server().await?;
+            let executable = FakeChromedriverBinaryBuilder::new()
+                .record_pid(&pid_file)
+                .on_termination_create_file(&terminated_file)
                 .announce_port(status_server.port())
                 .idle_until_terminated()
                 .write(directory.path().join("fake-chromedriver"))
                 .await?;
             let process = launch(
-                ChromeDriverLaunchRequest {
-                    executable,
-                    cache_lease: test_cache_lease(&directory).await?,
-                    config: ChromeDriverConfig::default(),
-                    cancellation: CancellationToken::new(),
-                },
+                default_request(executable, &directory).await?,
                 &test_status_client()?,
                 &test_lifecycle(),
             )
             .await?;
-            Ok::<_, rootcause::Report>((process, status_server))
+            // Hands the termination to a task that this runtime never polls: `block_on` returns
+            // without yielding again.
+            drop(process);
+            Ok::<_, rootcause::Report>(())
         })?;
 
-        // Terminating settles the drop guard, so the handle is dropped without a runtime check.
-        let current_thread = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        current_thread.block_on(process.terminate())?;
+        drop(runtime);
+
+        let pid = std::fs::read_to_string(&pid_file)?;
+        assert_that!(wait_until_gone(pid.trim()))
+            .with_detail_message("dropped process remained alive")
+            .is_true();
+        assert_that!(terminated_file.exists())
+            .with_detail_message("the process must be killed, not terminated gracefully")
+            .is_false();
         Ok(())
     }
 
@@ -904,10 +953,7 @@ mod tests {
             .exit(3)
             .write(directory.path().join("fake-chromedriver"))
             .await?;
-        let lifecycle = LifecyclePolicy::builder()
-            .graceful_shutdown(test_shutdown())
-            .driver_startup_timeout(Duration::from_millis(300))
-            .build();
+        let lifecycle = test_lifecycle_with_startup_timeout(Duration::from_millis(300));
 
         let error = launch(
             ChromeDriverLaunchRequest {
@@ -946,6 +992,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn test_lifecycle_with_startup_timeout(timeout: Duration) -> LifecyclePolicy {
+        LifecyclePolicy::builder()
+            .graceful_shutdown(test_shutdown())
+            .driver_startup_timeout(timeout)
+            .build()
+    }
+
+    /// A fixture whose `/status` endpoint reports readiness.
+    #[cfg(unix)]
+    async fn ready_status_server() -> Result<FixtureServer, rootcause::Report> {
+        Ok(FixtureServer::start(HashMap::from([(
+            "/status".to_owned(),
+            ResponseSpec::body(br#"{"value":{"ready":true}}"#.to_vec()),
+        )]))
+        .await?)
+    }
+
+    #[cfg(unix)]
     async fn test_cache_lease(directory: &TestDirectory) -> Result<CacheLease, rootcause::Report> {
         Ok(cache_lease(&directory.path().join("cache")).await?)
     }
@@ -953,6 +1017,39 @@ mod tests {
     #[cfg(unix)]
     fn test_status_client() -> Result<reqwest::Client, rootcause::Report> {
         Ok(reqwest::Client::builder().no_proxy().build()?)
+    }
+
+    /// A request launching `executable` with the default config and no cancellation.
+    #[cfg(unix)]
+    async fn default_request(
+        executable: std::path::PathBuf,
+        directory: &TestDirectory,
+    ) -> Result<ChromeDriverLaunchRequest, rootcause::Report> {
+        Ok(ChromeDriverLaunchRequest {
+            executable,
+            cache_lease: test_cache_lease(directory).await?,
+            config: ChromeDriverConfig::default(),
+            cancellation: CancellationToken::new(),
+        })
+    }
+
+    /// Whether the process `pid` exits (or becomes a zombie) within a few seconds. Blocking, so
+    /// that it can run without a runtime.
+    #[cfg(unix)]
+    fn wait_until_gone(pid: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .expect("ps runs");
+            let state = String::from_utf8_lossy(&state.stdout);
+            if state.trim().is_empty() || state.trim_start().starts_with('Z') {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
     }
 
     #[cfg(unix)]
@@ -969,6 +1066,23 @@ mod tests {
         status_client: &reqwest::Client,
         lifecycle: &LifecyclePolicy,
     ) -> crate::Result<ChromeDriverProcess> {
+        launch_tracked(
+            request,
+            status_client,
+            lifecycle,
+            &BackgroundTasks::default(),
+        )
+        .await
+    }
+
+    /// Like [`launch`], terminating a dropped process as one of the `background` tasks.
+    #[cfg(unix)]
+    async fn launch_tracked(
+        request: ChromeDriverLaunchRequest,
+        status_client: &reqwest::Client,
+        lifecycle: &LifecyclePolicy,
+        background: &BackgroundTasks,
+    ) -> crate::Result<ChromeDriverProcess> {
         ChromeDriverProcess::launch(
             &request.executable,
             request.cache_lease,
@@ -976,6 +1090,7 @@ mod tests {
             &request.cancellation,
             status_client,
             lifecycle,
+            background,
         )
         .await
     }

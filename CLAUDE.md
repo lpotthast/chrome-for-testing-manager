@@ -70,10 +70,13 @@ Supporting modules: `artifact_store/` (download, hardened ZIP extraction, instal
 shared/exclusive file-lock guards, clear/prune), `chromedriver/` (config, guarded process, output fan-out),
 `session/` (builder, Headless Shell launch), `version/` (requests + resolver), `process_support` (`ManagedProcess`:
 guarded spawn, output capture, startup, and terminate-then-drain, shared by driver and Headless Shell), `policy.rs`
-(`NetworkPolicy`, `LifecyclePolicy`). Dropped futures: installs cancel through a drop guard on their token and roll
-back in a task that owns the artifact lock and a cache lease, processes terminate on drop, and a session run hands
-cleanup to the runtime from a drop guard (tracked by the manager's `TaskTracker`, which `ChromeForTesting::shutdown`
-awaits). Cache contents live beneath a layout-versioned directory (`LAYOUT_DIR` in `cache/`); bump it instead of the
+(`NetworkPolicy`, `LifecyclePolicy`), `background.rs` (`BackgroundTasks`). Dropped futures and handles hand their
+cleanup to the manager's `BackgroundTasks`, which `ChromeForTesting::shutdown` and
+`ChromeForTestingManager::wait_for_background_tasks` await and whose failures they report as `BackgroundCleanup`:
+installs cancel through a drop guard on their token and roll back in a task that owns the artifact lock and a cache
+lease, a dropped process handle terminates its process gracefully in a background task (holding its cache lease; killed
+as a last resort only if no runtime is left to drive that task), and a session run hands cleanup to the runtime from a
+drop guard. Drop never blocks or panics. Cache contents live beneath a layout-versioned directory (`LAYOUT_DIR` in `cache/`); bump it instead of the
 completion-marker schema when the on-disk layout changes.
 
 Cancellation is opt-in and cooperative; the single authoritative description of the drop-safety guarantee lives in
@@ -84,9 +87,8 @@ Errors and runtime constraints:
 - All fallible APIs return `rootcause::Report<ChromeForTestingError>` (alias `chrome_for_testing_manager::Result`).
   Use `rootcause::prelude::ResultExt` (`.context(...)`) to attach context; do not return bare error enums. Variants
   covering the same failure for different artifacts are unified with a `ChromeForTestingArtifact` field.
-- `ChromeForTesting::launch`, `launch_driver`, and Headless Shell session runs assert `RuntimeFlavor::MultiThread`
-  and error with `UnsupportedRuntime` otherwise; every other async API errors with `MissingRuntime` outside a Tokio
-  runtime instead of panicking. Tests must use `#[tokio::test(flavor = "multi_thread")]`.
+- Any Tokio runtime flavor works. Spawning a managed process, the manager's async APIs, and `SessionBuilder::run`
+  error with `MissingRuntime` outside a Tokio runtime instead of panicking.
 
 Feature gate: `thirtyfour` (default; also enables `futures`). Gated items: `Session`, `ChromeForTesting::session`,
 `SessionBuilder`, `ChromeForTestingManager::prepare_caps`.
@@ -98,4 +100,5 @@ Feature gate: `thirtyfour` (default; also enables `futures`). Gated items: `Sess
 - License: MIT OR Apache-2.0
 - Clippy pedantic warnings are enforced (`just verify` runs with `-D warnings`)
 - Test assertions use the `assertr` crate; HTTP fixtures use `axum` (dev-dependency)
-- Tests require a multithreaded tokio runtime (`#[tokio::test(flavor = "multi_thread")]`)
+- Tests use `#[tokio::test(flavor = "multi_thread")]` by default; `tests/current_thread_runtime.rs` and the drop tests
+  in `chromedriver/process.rs` cover current-thread runtimes and dropping without a runtime

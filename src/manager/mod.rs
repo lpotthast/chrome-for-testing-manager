@@ -7,6 +7,7 @@
 pub(crate) mod config;
 
 use crate::artifact_store::ArtifactStore;
+use crate::background::BackgroundTasks;
 use crate::browser::{BrowserArtifactRequest, ChromeBinary, LoadedBrowserPackage};
 use crate::cache::{CacheDir, CachePruneResult};
 use crate::chromedriver::ChromeDriverConfig;
@@ -35,9 +36,9 @@ pub struct ChromeForTestingManager {
     /// No-proxy client for `WebDriver` sessions, bounded by the `WebDriver` request deadline.
     #[cfg(feature = "thirtyfour")]
     webdriver_client: reqwest::Client,
-    /// Cleanups of session runs whose future was dropped, shared by all clones.
-    #[cfg(feature = "thirtyfour")]
-    session_cleanups: crate::session::BackgroundCleanups,
+    /// Cleanups of dropped session runs, process handles, and installations, shared by all
+    /// clones.
+    background_tasks: BackgroundTasks,
     lifecycle: LifecyclePolicy,
     platform: Platform,
 }
@@ -112,6 +113,7 @@ impl ChromeForTestingManager {
             HttpClientPurpose::WebDriver,
         )?;
 
+        let background_tasks = BackgroundTasks::default();
         Ok(Self {
             resolver: VersionResolver::new(external_client.clone(), platform),
             artifact_store: ArtifactStore::new(
@@ -119,12 +121,12 @@ impl ChromeForTestingManager {
                 external_client,
                 network.artifact_download_timeout(),
                 platform,
+                background_tasks.clone(),
             ),
             local_client,
             #[cfg(feature = "thirtyfour")]
             webdriver_client,
-            #[cfg(feature = "thirtyfour")]
-            session_cleanups: crate::session::BackgroundCleanups::default(),
+            background_tasks,
             lifecycle,
             platform,
         })
@@ -217,9 +219,6 @@ impl ChromeForTestingManager {
         cancellation: CancellationToken,
     ) -> Result<Vec<LoadedBrowserPackage>> {
         crate::ensure_runtime()?;
-        crate::check_cancelled(&cancellation)?;
-        let cancellation = cancellation.child_token();
-        let _cancel_on_drop = cancellation.clone().drop_guard();
         self.artifact_store
             .install(selected, selected.requested_artifacts(), cancellation)
             .await
@@ -249,12 +248,9 @@ impl ChromeForTestingManager {
             platform: selected.platform(),
         };
         crate::ensure_runtime()?;
-        crate::check_cancelled(&cancellation)?;
         if !selected.requested_artifacts().contains(chrome_binary) {
             return Err(rootcause::report!(not_resolved()));
         }
-        let cancellation = cancellation.child_token();
-        let _cancel_on_drop = cancellation.clone().drop_guard();
         self.artifact_store
             .install(selected, chrome_binary.into(), cancellation)
             .await?
@@ -265,11 +261,13 @@ impl ChromeForTestingManager {
     /// Launch the validated package's matching `ChromeDriver`.
     ///
     /// Cancellation terminates a process spawned before the error is returned. Dropping the
-    /// returned future terminates it too, synchronously on a runtime worker.
+    /// returned future, or the returned process, terminates it in the background; see
+    /// [`Self::wait_for_background_tasks`].
     ///
     /// # Errors
     ///
-    /// Returns an error for cancellation, unsupported runtime, spawn, startup, or cleanup failure.
+    /// Returns [`ChromeForTestingError::MissingRuntime`] outside a Tokio runtime. Other errors
+    /// cover cancellation, spawn, startup, or cleanup failure.
     pub async fn launch_driver(
         &self,
         loaded: &LoadedBrowserPackage,
@@ -283,8 +281,26 @@ impl ChromeForTestingManager {
             &cancellation,
             &self.local_client,
             &self.lifecycle,
+            &self.background_tasks,
         )
         .await
+    }
+
+    /// Wait for the cleanups that dropped operations handed to the Tokio runtime, and report
+    /// their failures.
+    ///
+    /// Dropping a future or handle cannot await its cleanup, so it runs in the background:
+    /// terminating the process of a dropped [`ChromeDriverProcess`], quitting the session of a
+    /// dropped session run, or rolling back a dropped installation. This waits until none is left,
+    /// including cleanups started while waiting. [`crate::ChromeForTesting::shutdown`] calls it
+    /// before terminating `ChromeDriver`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChromeForTestingError::BackgroundCleanup`], with each failure attached, if
+    /// cleanups failed since the last call.
+    pub async fn wait_for_background_tasks(&self) -> Result<()> {
+        self.background_tasks.wait().await
     }
 
     /// Prepare default headless Chrome capabilities for a loaded browser package.
@@ -330,10 +346,10 @@ impl ChromeForTestingManager {
         &self.lifecycle
     }
 
-    /// Tracks the background cleanups of dropped session runs.
+    /// Tracks the background cleanups of dropped operations.
     #[cfg(feature = "thirtyfour")]
-    pub(crate) const fn session_cleanups(&self) -> &crate::session::BackgroundCleanups {
-        &self.session_cleanups
+    pub(crate) const fn background_tasks(&self) -> &BackgroundTasks {
+        &self.background_tasks
     }
 
     #[cfg(test)]

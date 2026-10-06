@@ -5,143 +5,215 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres
 to [Semantic Versioning](https://semver.org/).
 
-## [0.13.0] - 2026-10-05
+## [0.13.0] - 2026-10-06
 
 This release replaces the high-level `Chromedriver` API with `ChromeForTesting`, adds opt-in cancellation with
-drop-safe cleanup, and makes cache installation an atomic, cross-process transaction. Most public signatures changed;
-see "Changed" and "Removed" for migration notes.
+drop-safe cleanup, makes cache installation an atomic, cross-process transaction, and supports every Tokio runtime
+flavor. Most public signatures changed. See "Changed" and "Removed" for migration notes.
 
 ### Added
 
 - `ChromeForTesting::launch(ChromeForTestingConfig)` as the new entry point, with `driver_port()`,
   `browser_executable()`, `selected_version()`, `subscribe_output()`, `recent_output()`, `session()`, and an observable
-  `shutdown()`.
-- `ChromeForTestingConfig` (version, browser binary, cache directory, cancellation, network and lifecycle policies, and
-  a nested `ChromeDriverConfig`) and `ChromeForTestingManagerConfig` for the lower-level manager. `cache_dir` setters
-  and `ChromeForTestingManager::new_with_cache_dir` accept anything convertible into a `PathBuf`.
+  `shutdown()`. `shutdown()` first waits for the background cleanups of dropped operations and reports their failures,
+  then terminates `ChromeDriver`. A termination failure remains primary.
+- `ChromeForTestingConfig` (`version`, `chrome_binary`, `cache_dir`, `cancellation`, `network`, `lifecycle`, and a
+  nested `ChromeDriverConfig` under `driver`), and `ChromeForTestingManagerConfig` with
+  `ChromeForTestingManager::new_with_config` for the lower-level manager. Config types are write-only builders without
+  getters.
 - `NetworkPolicy` (connect, manifest, artifact-download, and `WebDriver` request deadlines) and `LifecyclePolicy`
   (graceful shutdown, `ChromeDriver` and Headless Shell startup, and session-cleanup deadlines).
-- Opt-in cooperative cancellation through a re-exported `CancellationToken`: optional on `ChromeForTestingConfig` and
-  `SessionBuilder::with_cancellation`, and a required argument of the lower-level `ChromeForTestingManager` methods (pass
+- Opt-in cooperative cancellation through a re-exported `CancellationToken` (from `tokio-util` 0.7). It is optional on
+  `ChromeForTestingConfig` and `SessionBuilder::with_cancellation`, and a required argument of
+  `ChromeForTestingManager::resolve_version`, `download`, `download_for`, and `launch_driver` (pass
   `CancellationToken::new()` to never cancel). Cancellation is reported as `ChromeForTestingError::Cancelled` after
-  cleanup has finished. Dropped futures are rolled back as well; see the crate-level "Cancellation and drop safety"
-  docs.
+  cleanup has finished. A token cancelled before a download fails it without touching the cache. Dropped futures are
+  cleaned up as well: installations roll back, processes are terminated, and sessions are quit. See the crate-level
+  "Cancellation and drop safety" docs.
+- `ChromeForTestingManager::wait_for_background_tasks()` waits for the cleanups that dropped operations hand to the
+  runtime (terminating the processes of dropped handles, quitting the sessions of dropped session runs, rolling back
+  dropped installations) and reports their failures as `ChromeForTestingError::BackgroundCleanup`, each failure
+  attached.
 - `ChromeDriverProcess`, returned by `ChromeForTestingManager::launch_driver`, exposing `port()`, `subscribe_output()`,
   `recent_output()`, and a consuming `terminate()`.
 - `subscribe_output()` returns a bounded, non-blocking `DriverOutputSubscription`. A subscriber that falls behind gets a
-  recoverable `DriverOutputSubscriptionError::Lagged`; `Closed` is reported once the driver's output ends, including
+  recoverable `DriverOutputSubscriptionError::Lagged`. `Closed` is reported once the driver's output ends, including
   when the driver exits on its own.
-- `recent_output()` returns the last 256 driver output lines since spawn. Startup errors of `ChromeDriver` and Chrome
-  Headless Shell carry their recent output as a report attachment, as do failed attachments to a Chrome Headless Shell.
+- `recent_output()` returns up to the last 256 driver output lines since spawn. Startup errors of `ChromeDriver` and
+  Chrome Headless Shell (except cancellation) carry their recent output as a report attachment, as do failed
+  `WebDriver` session starts against a Chrome Headless Shell.
 - `subscribe_output_with_history()` on `ChromeForTesting` and `ChromeDriverProcess` returns the recent output together
   with a subscription, without missing or duplicating a line in between.
-- `ChromeDriverConfig::log_level` with `ChromeDriverLogLevel` (default `Info`) to configure `ChromeDriver`'s own log
-  verbosity.
-- `Port` implements `Hash`, `PartialOrd`, `Ord`, `From<NonZeroU16>`, and `TryFrom<u16>`, and `u16` implements
-  `From<Port>`.
+- A `log_level` option on `ChromeDriverConfig::builder()`, taking a `ChromeDriverLogLevel` (default `Info`, the level
+  previously hardcoded), to configure `ChromeDriver`'s own log verbosity.
+- `Port::try_new`. `Port` implements `Hash`, `PartialOrd`, `Ord`, `From<NonZeroU16>`, and `TryFrom<u16>`, `u16`
+  implements `From<Port>`, and `PortRequest` implements `Hash`.
 - `DriverOutputLine::new` and a `Display` implementation for `DriverOutputLine`.
-- `BrowserArtifactRequest` for artifact-aware version resolution, `ChromeForTestingManager::download_for` to install a
-  single browser package, `ChromeForTestingManager::prune_cache` with `CachePruneResult`, and
-  `ChromeForTestingManager::platform()`.
+- `BrowserArtifactRequest` (with `From<ChromeBinary>`) for artifact-aware version resolution,
+  `ChromeForTestingManager::download_for` to install one browser package and `ChromeDriver` (even if the selection
+  resolved both browsers), `ChromeForTestingManager::prune_cache` with `CachePruneResult`,
+  `ChromeForTestingManager::platform()`, and `ChromeForTestingManager::cache_dir()`.
+- `ChromeForTestingManager` and `SelectedVersion` implement `Clone`. Clones of a manager share its background tasks.
+  `SelectedVersion` exposes `platform()` and `requested_artifacts()`.
+- `Display` for `VersionRequest` (e.g. `latest Stable`), `ChromeBinary`, and `BrowserArtifactRequest` (e.g.
+  `chrome and chrome-headless-shell`).
 - `Session::driver()` and `AsRef<WebDriver>` for `Session`.
-- Re-exported `Platform` and the new `HttpClientPurpose`.
-- Safety limits for downloaded artifacts: archives larger than 2 GiB (`DownloadTooLarge`), with more than 65,536
-  entries (`ZipTooManyEntries`), or decompressing to more than 2 GiB (`ZipTooLarge`) are rejected.
-- Typed errors for previously panicking or untyped situations, including `MissingRuntime` (no Tokio runtime),
-  `CacheInUse`, `ChromeDriverPortMismatch`, `ChromeDriverNotReady`, `ExitedDuringStartup`,
-  and `UnrecognizedStartupOutput`.
+- Re-exported `Platform`, and `HttpClientPurpose`, which identifies the failed client in the new `BuildHttpClient`
+  error.
+- Safety limits for downloaded artifacts: archives larger than 2 GiB (`DownloadTooLarge`) or with more than 65,536
+  entries (`ZipTooManyEntries`) are rejected.
+- Error variants for failures that previously panicked or that the new features introduce:
+  - `MissingRuntime`, returned instead of panicking when `ChromeForTesting::launch`, `SessionBuilder::run`, or a
+    `ChromeForTestingManager` operation is called outside a Tokio runtime, and `BuildHttpClient`, previously a panic in
+    `reqwest`.
+  - Cache: `CacheInUse`, `OpenLockFile`, `AcquireCacheLock`, `ReadCacheDir`, and `RemoveCacheEntry`.
+  - Installation: `ValidateInstalledPackage`, `CreateStagingDir`, `RemoveStaleArtifact`,
+    `InvalidPackageExecutablePath`, `MissingExtractedExecutable`, `WriteCompletionMarker`, and
+    `InstallCompletedPackage`.
+  - Version selection: `BrowserArtifactNotResolved` (from `download_for`) and `SelectedVersionPlatformMismatch`.
+  - Process startup: `ChromeDriverPortMismatch`, `ChromeDriverNotReady`, `ExitedDuringStartup`,
+    `UnrecognizedStartupOutput`, `StartupOutputClosed`, and `ReadStartupOutput`.
+  - Sessions: `UnsupportedHeadlessShellCapability` and `QuitSessionTimeout`.
 
 ### Changed
 
 - **Breaking:** Updated `chrome-for-testing` to 0.5.0. Its `Channel`, `Version`, and `Platform` types are re-exported,
   so their changes (including Linux ARM64 support) are part of this crate's API.
 - **Breaking:** Renamed `ChromeForTestingManagerError` to `ChromeForTestingError` and restructured its variants:
-  - Variants describing the same failure for different artifacts are merged and carry a `ChromeForTestingArtifact`
-    (e.g. `SpawnProcess`, `WaitForStartup`, `TerminateProcess`, `NoArtifactDownload`, and the ZIP errors).
-  - Every struct variant is `#[non_exhaustive]`; match with `..`.
-  - `UnsupportedPlatform` carries the detected `os` and `arch`, and `NoMatchingVersion` the target `platform`.
-  - Underlying causes (e.g. from `chrome-for-testing`, `reqwest`, or I/O) are kept as typed report children.
-- **Breaking:** `ChromeForTestingManager::launch_chromedriver(loaded, port, inspectors, shutdown)` is replaced by
-  `launch_driver(&LoadedBrowserPackage, ChromeDriverConfig, CancellationToken)`, which returns a
-  `ChromeDriverProcess` instead of a process, port, and inspector tuple.
-- **Breaking:** `resolve_version` takes a `BrowserArtifactRequest` and a `CancellationToken`. `Latest` and channel
-  requests only select releases providing `ChromeDriver` and every requested browser package.
-- **Breaking:** `download` takes the `SelectedVersion` and a `CancellationToken` and installs the artifact set recorded
-  during resolution, instead of taking a separate `&[ChromeBinary]` slice.
-- **Breaking:** `LoadedBrowserPackage` is a struct (`chrome_binary()`, `browser_executable()`,
-  `chromedriver_executable()`) instead of an enum over `LoadedChromePackage` / `LoadedChromeHeadlessShellPackage`. It
-  holds a shared cache lease, so the cache cannot be cleared or pruned while it is in use.
-- **Breaking:** `Port` is backed by `NonZeroU16`. `Port::new(0)` now panics; use `Port::try_new` for unchecked values,
+  - Variants describing the same failure for different artifacts are merged into variants carrying a
+    `ChromeForTestingArtifact`: `SpawnProcess`, `WaitForStartup`, `TerminateProcess`, and `NoArtifactDownload`. The
+    ZIP errors `InvalidZip`, `ZipTooLarge`, and `ExtractZip` carry the artifact as well.
+  - Broader variants absorb narrower ones: `WriteDownloadFile` (which gained the file `path`) covers creating and
+    flushing the download file, `InvalidZip` covers opening the archive, `CreateCacheDir` covers platform directories,
+    `RemoveCacheEntry` replaces `RemoveCacheDir` and `RecreateCacheDir`, and `InvalidHeadlessShellRemoteDebuggingArg`
+    replaces both remote-debugging argument variants.
+  - Every variant except `Cancelled` and `MissingRuntime` is `#[non_exhaustive]`. Match struct variants with `..`, and
+    the unit variants `DetermineCacheDir`, `ConfigureSessionCapabilities`, `RunSessionCallback`, and `QuitSession` as
+    `Variant { .. }`.
+  - Changed fields: `UnsupportedPlatform` carries the detected `os` and `arch`, `NoMatchingVersion` the target
+    `platform` and the `requested_artifacts`, `TerminateProcess` the executable `path` instead of a port or `DevTools`
+    address, and `WaitForStartup` the startup `timeout`. `ZipTooLarge`'s `size` and `max_size` are `u64` instead of
+    `u128`.
+  - Errors from `chrome-for-testing` (manifest requests, platform detection) are kept as typed report children instead
+    of stringified attachments.
+  - Messages render version requests and artifact sets readably (e.g. `latest Stable`, `chrome and
+    chrome-headless-shell`) instead of in their `Debug` form, and `DetermineCacheDir` suggests configuring a cache
+    directory instead of asking whether `$HOME` is set.
+- **Breaking:** `ChromeForTestingManager::launch_chromedriver(loaded, port, output_listener, shutdown)` is replaced by
+  `launch_driver(&LoadedBrowserPackage, ChromeDriverConfig, CancellationToken)`, which returns a `ChromeDriverProcess`
+  instead of a `(process, port, inspectors)` tuple. The port moves into `ChromeDriverConfig`, the graceful shutdown into
+  the manager's `LifecyclePolicy` (see `ChromeForTestingManagerConfig`), and the output listener is replaced by
+  `subscribe_output()`.
+- **Breaking:** `resolve_version` takes a `BrowserArtifactRequest` and a `CancellationToken`, and checks downloads for
+  the target platform. `Latest` selects the newest release providing `ChromeDriver` and every requested browser
+  package. A channel or pinned request whose release lacks one fails with `NoMatchingVersion` during resolution instead
+  of later during download.
+- **Breaking:** `download` takes `&SelectedVersion` and a `CancellationToken` and installs the artifact set recorded
+  during resolution, instead of taking a separate `&[ChromeBinary]` slice. It returns one package per resolved browser,
+  Chrome before Chrome Headless Shell.
+- **Breaking:** `LoadedBrowserPackage` is a struct instead of an enum over `LoadedChromePackage` /
+  `LoadedChromeHeadlessShellPackage`, so it can no longer be matched on. Use its `chrome_binary()`,
+  `browser_executable()`, and `chromedriver_executable()` accessors. It holds a shared cache lease, so the cache cannot
+  be cleared or pruned while it is in use.
+- **Breaking:** `Port` is backed by `NonZeroU16`. `Port::new(0)` now panics. Use `Port::try_new` for unchecked values,
   or pass `0u16` where `Into<PortRequest>` is accepted, which now means `PortRequest::Any`. `PortRequest` is
   `#[non_exhaustive]`.
 - Deprecated `SelectedVersion::has_chromedriver_download`: it is always `true` now.
-- **Breaking:** `SessionBuilder` no longer has type-state parameters. `with_caps` / `with_config` accept closures
-  borrowing from the caller (`Send + 'a`), and repeated calls compose in order instead of replacing earlier ones.
+- **Breaking:** `SessionBuilder` no longer has type-state parameters (it is `SessionBuilder<'a>`). `with_caps` /
+  `with_config` closures must be `Send` (they may still borrow for `'a`), and repeated calls compose in order.
 - **Breaking:** Driver output is observed through `subscribe_output()` / `recent_output()`. `DriverOutputLine` is
-  `#[non_exhaustive]` and lost its `sequence` field; construct it with `DriverOutputLine::new`.
+  `#[non_exhaustive]` and lost its `sequence` field. Construct it with `DriverOutputLine::new`.
+- **Breaking:** Dropping a `ChromeForTesting`, a `ChromeDriverProcess`, or a session run's Chrome Headless Shell no
+  longer waits for the process to exit, and never panics. As a result, every Tokio runtime flavor is supported,
+  including current-thread runtimes and plain `#[tokio::test]`. Previously, dropping blocked a runtime worker until the
+  process was terminated and panicked without a multi-threaded runtime, and `Chromedriver::run` rejected current-thread
+  runtimes.
+  - The process is terminated gracefully, with its configured `GracefulShutdown`, in a background task on the current
+    runtime. To wait for termination and observe its result, call `shutdown()` / `terminate()` instead of dropping, or
+    `ChromeForTestingManager::wait_for_background_tasks` for processes launched through a manager you hold.
+  - The process keeps its cache lease until it has exited or been killed, so `clear_cache` / `prune_cache` report
+    `CacheInUse` while a dropped process is still shutting down.
+  - A forceful kill of the process group is only the last resort, used when no runtime is left to drive graceful
+    termination (dropped outside a runtime, or the runtime shut down first). It is logged as a warning.
+- If graceful termination fails, the process is killed once more. If that fails too, or the killed process does not
+  exit within 5 s, the error is returned instead of retrying termination and panicking when the handle is dropped.
+- **Breaking:** Managed `WebDriver` sessions connect to `127.0.0.1` instead of `localhost`, through a no-proxy HTTP
+  client, so `HTTP_PROXY` no longer breaks them. Its request deadline is `NetworkPolicy::webdriver_request_timeout`
+  (default 120 s, matching `thirtyfour`'s own default). `WebDriverBuilder::request_timeout` inside `with_config` no
+  longer has an effect. Replace the client through `WebDriverBuilder::client` for other HTTP settings.
+- Quitting a session during cleanup is bounded by `LifecyclePolicy::session_cleanup_timeout`. A quit that fails or
+  times out is abandoned instead of triggering `thirtyfour`'s blocking quit retry on drop, and a Chrome Headless Shell
+  is terminated regardless.
+- A Chrome Headless Shell is also terminated gracefully when the session future is dropped while the shell is still
+  starting. Previously, it was killed and the drop panicked.
+- A session callback that panics before returning its future is caught like any other callback panic: the session is
+  quit and the shell terminated before the panic resumes.
+- `ChromeDriver` startup requires both its startup line and a ready `/status` response, all within the configurable
+  `ChromeDriver` startup deadline (default 10 s). An unparsable startup line fails immediately with
+  `UnrecognizedStartupOutput` instead of waiting for the deadline, and a fixed port must match the port the driver
+  reports (`ChromeDriverPortMismatch`).
+- **Breaking:** Chrome Headless Shell sessions reject every `goog:chromeOptions` entry other than `args`
+  (`UnsupportedHeadlessShellCapability`), because `ChromeDriver` cannot apply them when attaching to a running shell.
+  The cached-shell `binary` set by `prepare_caps` is removed automatically. The shell's whole startup, including its
+  initial page, is bounded by the Headless Shell startup deadline. Browser arguments given without their leading `--`
+  (e.g. `user-agent=...`) are normalized as `ChromeDriver` does for regular Chrome, instead of being opened as URLs.
 - Artifact installation is an atomic cross-process transaction: a shared cache lease plus a per-artifact lock, unique
   staging directories, a completion marker recording the executable size, and an atomic rename into place. Cache hits
   are validated through the marker and the executable size, without taking the lock. Interrupted installations and
-  removals never leave a partial package behind. A dropped installation future rolls back in the background and keeps
-  its locks until its file-system work has stopped. The downloaded archive is deleted right after extraction.
+  removals never leave a partial package behind. An I/O error while validating an installed package is reported
+  instead of replacing the package, which may be in use, and a file or directory standing where a package or its
+  completion marker belongs is repaired by reinstalling the package. A dropped installation future rolls back in the
+  background and keeps its locks until its file-system work has stopped. A failed rollback is reported by
+  `ChromeForTesting::shutdown` / `wait_for_background_tasks`. The downloaded archive is deleted right after extraction.
 - **Breaking:** Cached artifacts live in a layout-versioned directory (`v1`) beneath the cache root, so releases with
   different on-disk layouts never replace each other's packages, even while in use. Version directories that earlier
-  releases stored directly in the cache root are neither reused nor removed by `clear_cache` / `prune_cache`; delete
+  releases stored directly in the cache root are neither reused nor removed by `clear_cache` / `prune_cache`. Delete
   them manually once no older release uses them.
 - ZIP extraction runs on a hardened, cancellable extractor instead of `zip`'s built-in one. Files are written before
   any symlink exists, every symlink is validated by real resolution to stay inside the published package, and
   dangling or over-long symlinks are rejected. Archive permissions lose setuid, setgid, and sticky bits as well as group
-  and other write access, and owners keep write access.
-- `ChromeDriver` startup requires the spawned process's own startup line and a ready `/status`, all within the
-  configured startup deadline. Fixed ports are checked against the port the driver reports.
-- Chrome Headless Shell sessions reject capability options that `ChromeDriver` cannot apply when attaching to a running
-  shell, and the shell's whole startup, including its initial page, is bounded by the Headless Shell startup deadline.
-  Browser arguments given without their leading `--` (e.g. `user-agent=...`) are normalized as `ChromeDriver` does
-  for regular Chrome, instead of being opened as URLs.
-- Failed graceful termination escalates to a kill. If even that fails, or the killed process does not exit within 5 s,
-  the error is returned instead of blocking forever, retrying termination, or panicking when the handle is dropped.
-- Managed `WebDriver` sessions connect to `127.0.0.1` through a no-proxy HTTP client, so `HTTP_PROXY` no longer breaks
-  them. Its request deadline is `NetworkPolicy::webdriver_request_timeout` (default 120 s);
-  `WebDriverBuilder::request_timeout` inside `with_config` has no effect on it. Replace the client through
-  `WebDriverBuilder::client` for other HTTP settings.
-- Session cleanup quits the session within `LifecyclePolicy::session_cleanup_timeout` and honors
-  `SessionBuilder::with_config`. A quit that fails or does not answer is abandoned without `thirtyfour`'s blocking drop
-  retry, and a Chrome Headless Shell is terminated regardless.
-- A Chrome Headless Shell is terminated gracefully whenever its session run ends, including on failure, cancellation,
-  a panic in a `with_config` closure, or a dropped session future.
-- A session callback that panics before returning its future is caught like any other callback panic, so its cleanup
-  is awaited instead of handed to the runtime.
-- `ChromeForTesting::shutdown` waits for the background cleanup of dropped session runs before terminating
-  `ChromeDriver`.
+  and other write access, and owners are always granted read and write access (and execute access on directories).
+  The 2 GiB decompressed-size limit (`ZipTooLarge`) is enforced on the bytes actually extracted instead of the size the
+  archive declares.
+- Artifact downloads are bounded by `NetworkPolicy::artifact_download_timeout` (default 15 min) instead of being
+  aborted after three consecutive 30 s stalls. Release-manifest requests and connections time out after 30 s each
+  (previously unbounded).
+- `clear_cache` removes only cached version directories and leftovers of interrupted removals, instead of deleting and
+  recreating the whole cache directory, so unrelated files in a custom cache directory are kept. On Windows, cache
+  renames and removals are retried briefly while a virus scanner or indexer holds a file open.
 - Driver output lines no longer keep the `\r` of a `\r\n` line terminator.
-- `clear_cache` only removes cached version directories and the crate's own leftovers, keeping unrelated files in a
-  custom cache directory. `clear_cache` and `prune_cache` also remove the lock files of removed versions. Removals
-  rename a directory to a trash entry first, so an interrupted removal never leaves a partial package behind. A
-  leftover that cannot be removed no longer makes every later `clear_cache` / `prune_cache` fail. On Windows, renames
-  and removals are retried briefly while a virus scanner or indexer holds a file open.
-- A transient I/O error while validating an installed package no longer causes the package, possibly in use, to be
-  replaced, and leftover staging directories that cannot be removed no longer block installation. A file or directory
-  standing where a package or its completion marker belongs is repaired by reinstalling the package.
-- `download_for` installs only the requested browser and `ChromeDriver`, even if the selected version resolved both
-  browsers.
 - `futures` is only a dependency with the `thirtyfour` feature.
-- The crate-level documentation is the README content regardless of the enabled features; the README is generated
-  from it with `cargo-rdme`.
-- Updated `tokio-process-tools` to 0.11.2.
+- The crate-level documentation contains the full README content. The README is generated from it with `cargo-rdme`.
+- Updated `tokio-process-tools` to 0.11.3.
+
+### Fixed
+
+- `PortRequest::Any` (the default) lets the OS assign a free port, as documented. Previously no `--port` was passed,
+  so `ChromeDriver` bound its default port 9515, and concurrent environments collided.
+- `launch_driver` supports non-Unicode executable paths, and `prepare_caps` returns `PrepareChromeCapabilities` for
+  them, instead of panicking.
+- On an unsupported platform, creating a manager or launching fails with `UnsupportedPlatform` before creating the
+  cache directory.
 
 ### Removed
 
 - **Breaking:** `Chromedriver`, `ChromedriverRunConfig`, and `Chromedriver::run` / `run_default` / `terminate`. Use
-  `ChromeForTesting::launch`, `ChromeForTestingConfig`, and `ChromeForTesting::shutdown`.
+  `ChromeForTesting::launch`, `ChromeForTestingConfig`, and `ChromeForTesting::shutdown`. The config's `port` moved to
+  `ChromeDriverConfig` (`.driver(...)`), `graceful_shutdown` to `LifecyclePolicy` (`.lifecycle(...)`), and
+  `output_listener` is replaced by `subscribe_output()`.
 - **Breaking:** `LoadedChromePackage` and `LoadedChromeHeadlessShellPackage` (see `LoadedBrowserPackage`).
-- **Breaking:** `DriverOutputInspectors` and the `DriverOutputListener` callback API.
-- **Breaking:** `From<u16> for Port` and `AsRef<u16> for Port`; use `Port::new` / `Port::try_new` and `Port::as_u16`.
-- **Breaking:** Error variants replaced by the merged variants above: `NoChromeDownload`, `NoChromedriverDownload`,
-  `NoChromeHeadlessShellDownload`, `SpawnBrowser`, `SpawnChromedriver`, `WaitForBrowserStartup`,
-  `WaitForChromedriverStartup`, `TerminateBrowser`, `TerminateChromedriver`, `CreateDownloadFile`,
-  `FlushDownloadFile`, `OpenDownloadedZip`, `RemoveDownloadedZip`, `CreatePlatformDir`, `RemoveCacheDir`,
-  `RecreateCacheDir`, `DownloadStalled`, `EmptyChromeBinaryDownloadRequest`,
-  `InvalidHeadlessShellRemoteDebuggingPortArg`, and `UnsupportedHeadlessShellRemoteDebuggingArg`.
+- **Breaking:** `DriverOutputInspectors` and the `DriverOutputListener` callback API. Use `subscribe_output()` /
+  `recent_output()`.
+- **Breaking:** `From<u16> for Port` and `AsRef<u16> for Port`. Use `Port::new` / `Port::try_new` and `Port::as_u16`.
+- **Breaking:** The `UnsupportedRuntime` error variant: current-thread runtimes are supported now.
+- **Breaking:** Error variants that were merged or absorbed (see "Changed"): `NoChromeDownload`,
+  `NoChromedriverDownload`, `NoChromeHeadlessShellDownload`, `SpawnBrowser`, `SpawnChromedriver`,
+  `WaitForBrowserStartup`, `WaitForChromedriverStartup`, `TerminateBrowser`, `TerminateChromedriver`,
+  `CreateDownloadFile`, `FlushDownloadFile`, `OpenDownloadedZip`, `CreatePlatformDir`, `RemoveCacheDir`,
+  `RecreateCacheDir`, `InvalidHeadlessShellRemoteDebuggingPortArg`, and `UnsupportedHeadlessShellRemoteDebuggingArg`.
+- **Breaking:** Error variants whose failure can no longer occur: `RemoveDownloadedZip` (deleting the extracted archive
+  is best effort), `EmptyChromeBinaryDownloadRequest` (a `BrowserArtifactRequest` cannot be empty), and
+  `DownloadStalled` (see the download deadline above).
 
 ## [0.12.0] - 2026-06-16
 

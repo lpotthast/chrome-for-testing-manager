@@ -239,7 +239,7 @@ impl ArtifactStore {
                 artifact = %plan.artifact(),
                 %version,
                 path = %plan.final_executable.display(),
-                "artifact already installed"
+                "Artifact already installed."
             );
             return Ok(plan.final_executable);
         }
@@ -275,7 +275,7 @@ impl ArtifactStore {
                 tracing::warn!(
                     path = %staging.display(),
                     %error,
-                    "failed to remove the staging directory of an installed package"
+                    "Failed to remove the staging directory of an installed package."
                 );
             }
             (install_result, cleanup_result) => operation_result_with_cleanup(
@@ -295,7 +295,7 @@ impl ArtifactStore {
     ) -> Result<()> {
         let artifact = plan.artifact();
         let version = plan.version;
-        tracing::info!(artifact = %artifact, %version, "installing artifact");
+        tracing::info!(artifact = %artifact, %version, "Installing artifact.");
         let archive_path = staging.join(format!("{artifact}.zip"));
         download::download_artifact_archive(
             &self.client,
@@ -319,7 +319,7 @@ impl ArtifactStore {
         // Free the archive's disk space right away. Best effort: the staging cleanup removes it
         // too, but a crash after publication would leave it behind until the cache is cleared.
         if let Err(error) = cache::retry_while_locked(|| fs::remove_file(&archive_path)).await {
-            tracing::debug!(path = %archive_path.display(), %error, "failed to remove extracted archive");
+            tracing::debug!(path = %archive_path.display(), %error, "Failed to remove extracted archive.");
         }
 
         // Successful extraction is the commit point: the remaining validation and publication
@@ -358,7 +358,7 @@ impl ArtifactStore {
             artifact = %artifact,
             %version,
             path = %plan.final_package.display(),
-            "artifact installation complete"
+            "Artifact installation complete."
         );
         Ok(())
     }
@@ -375,7 +375,7 @@ impl ArtifactStore {
                     artifact = %plan.artifact(),
                     dir = %plan.platform_dir.display(),
                     %error,
-                    "failed to remove leftovers of an interrupted installation"
+                    "Failed to remove leftovers of an interrupted installation."
                 );
             }
         }

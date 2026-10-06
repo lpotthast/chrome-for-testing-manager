@@ -63,7 +63,7 @@ impl BackgroundTasks {
     /// Record the failure of a background cleanup, to be reported by [`Self::wait`].
     pub(crate) fn record_failure(&self, error: Report<ChromeForTestingError>) {
         // Logged as well: the failure is lost if nobody waits for the background tasks.
-        tracing::error!(%error, "background cleanup of a dropped operation failed");
+        tracing::error!(%error, "Background cleanup of a dropped operation failed.");
         self.failures
             .lock()
             .expect("background failure mutex is not poisoned")

@@ -151,7 +151,7 @@ impl CacheDir {
             tracing::warn!(
                 dir = %self.layout.display(),
                 %error,
-                "failed to remove leftovers of an interrupted cache removal"
+                "Failed to remove leftovers of an interrupted cache removal."
             );
         }
 
@@ -194,7 +194,7 @@ impl CacheDir {
                 %version,
                 dir = %locks_dir.display(),
                 %error,
-                "failed to remove lock files of a removed version"
+                "Failed to remove lock files of a removed version."
             );
         }
     }
@@ -255,7 +255,7 @@ pub(crate) async fn remove_tree(path: &Path, trash_prefix: &str) -> io::Result<(
         tracing::warn!(
             path = %trash.display(),
             %error,
-            "failed to delete a removed directory; it is retried with the next removal"
+            "Failed to delete a removed directory. It is retried with the next removal."
         );
     }
     Ok(())

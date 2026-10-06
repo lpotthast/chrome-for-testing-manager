@@ -221,13 +221,13 @@ impl OutputCapture {
             let (stdout, stderr) = tokio::join!(stdout.wait(), stderr.wait());
             for result in [stdout, stderr] {
                 if let Err(error) = result {
-                    tracing::debug!(%error, "output consumer ended with an error");
+                    tracing::debug!(%error, "Output consumer ended with an error.");
                 }
             }
         })
         .await;
         if drained.is_err() {
-            tracing::debug!("output consumers did not finish in time and were aborted");
+            tracing::debug!("Output consumers did not finish in time and were aborted.");
         }
         let history = history
             .lock()
@@ -254,7 +254,7 @@ impl OutputCapture {
                 move |line| {
                     // Line parsing splits at `\n` only, which leaves the `\r` of `\r\n`.
                     let line_ref: &str = line.strip_suffix('\r').unwrap_or(&line);
-                    tracing::debug!(process = name, source = ?source, output = line_ref, "process output");
+                    tracing::debug!(process = name, source = ?source, output = line_ref, "Process output.");
 
                     let line = DriverOutputLine::new(source, line_ref);
                     // Publish under the history lock; see `subscribe_with_history`.

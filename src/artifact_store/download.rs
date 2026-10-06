@@ -26,7 +26,7 @@ pub(crate) async fn download_artifact_archive(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<()> {
-    tracing::info!(%url, "downloading artifact");
+    tracing::info!(%url, "Downloading artifact.");
     let download_error = || ChromeForTestingError::Download {
         artifact,
         url: url.to_owned(),
@@ -56,7 +56,7 @@ pub(crate) async fn download_artifact_archive(
         tracing::info!(
             content_length,
             content_length_mb,
-            "artifact response received"
+            "Artifact response received."
         );
     }
 
@@ -83,6 +83,6 @@ pub(crate) async fn download_artifact_archive(
     file.flush().await.context_with(write_error)?;
     crate::check_cancelled(cancellation)?;
     drop(file);
-    tracing::info!(path = %archive_path.display(), "artifact download complete");
+    tracing::info!(path = %archive_path.display(), "Artifact download complete.");
     Ok(())
 }

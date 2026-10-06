@@ -215,7 +215,7 @@ impl<'a> SessionBuilder<'a> {
                 if let Err(cleanup_err) = cleanup_result {
                     tracing::error!(
                         error = %cleanup_err,
-                        "failed to clean up browser session after callback panic"
+                        "Failed to clean up browser session after callback panic."
                     );
                 }
                 std::panic::resume_unwind(payload);

@@ -46,8 +46,9 @@ type ManagedOutputStream = BroadcastOutputStream<ReliableWithBackpressure, Repla
 
 /// A spawned process, together with everything terminating it requires.
 ///
-/// Dropping it before [`Self::terminate`] ran kills the process: the last resort, used only when
-/// graceful termination can no longer be awaited (no runtime is left to drive it).
+/// Dropping it before [`Self::terminate`] completed kills the process: the last resort, used only
+/// when graceful termination can no longer be awaited (no runtime is left to drive it, or the
+/// termination future was dropped mid-flight).
 #[derive(Debug)]
 struct GuardedProcess {
     handle: ProcessHandle<ManagedOutputStream>,
@@ -57,19 +58,23 @@ struct GuardedProcess {
     shutdown: GracefulShutdown,
     /// Keeps the executable's cache entry from being removed while the process runs.
     _cache_lease: CacheLease,
-    /// Whether termination ran. Its failure, if any, was accepted and reported.
+    /// Whether termination completed. Its failure, if any, was accepted and reported.
     settled: bool,
 }
 
 impl GuardedProcess {
     /// Terminate the process with its shutdown policy, escalating to a kill on failure.
     ///
-    /// Settles the process either way: if even the kill fails, the failure is accepted (and
-    /// reported) rather than retrying termination when the process is dropped.
+    /// Settles the process either way once it completes: if even the kill fails, the failure is
+    /// accepted (and reported) rather than retrying termination when the process is dropped. If
+    /// this future is dropped before it completes, the process stays unsettled, and dropping it
+    /// kills it: an interrupted termination leaves the handle's drop guard armed.
     async fn terminate(&mut self) -> Result<ExitStatus> {
-        self.settled = true;
         let terminate_error = match self.handle.terminate(self.shutdown.clone()).await {
-            Ok(status) => return Ok(status),
+            Ok(status) => {
+                self.settled = true;
+                return Ok(status);
+            }
             Err(error) => error,
         };
         let mut error = Report::new_sendsync(terminate_error).context(
@@ -78,7 +83,9 @@ impl GuardedProcess {
                 path: self.executable.clone(),
             },
         );
-        match tokio::time::timeout(KILL_TIMEOUT, self.handle.kill()).await {
+        let kill_result = tokio::time::timeout(KILL_TIMEOUT, self.handle.kill()).await;
+        self.settled = true;
+        match kill_result {
             Ok(Ok(())) => {
                 error = error.attach("the process was killed after graceful termination failed");
             }
@@ -87,7 +94,7 @@ impl GuardedProcess {
                 tracing::error!(
                     process = self.name,
                     error = %kill_error,
-                    "failed to kill process after graceful termination failed; it may still be running"
+                    "Failed to kill process after graceful termination failed. It may still be running."
                 );
                 attach_child(&mut error, Report::new_sendsync(kill_error));
             }
@@ -96,7 +103,7 @@ impl GuardedProcess {
                 tracing::error!(
                     process = self.name,
                     timeout = ?KILL_TIMEOUT,
-                    "killed process did not exit in time; it may still be running"
+                    "Killed process did not exit in time. It may still be running."
                 );
                 error = error.attach(format!(
                     "the process was killed after graceful termination failed, but did not exit \
@@ -115,13 +122,13 @@ impl Drop for GuardedProcess {
         }
         tracing::warn!(
             process = self.name,
-            "no Tokio runtime is left to gracefully terminate a dropped process; killing it"
+            "A dropped process can no longer be terminated gracefully. Killing it."
         );
         if let Err(error) = self.handle.start_kill() {
             tracing::error!(
                 process = self.name,
                 %error,
-                "failed to kill a dropped process; it may still be running"
+                "Failed to kill a dropped process. It may still be running."
             );
             self.handle.must_not_be_terminated();
         }
@@ -132,7 +139,7 @@ impl Drop for GuardedProcess {
 ///
 /// Drop cannot await termination, so it hands the process to a background task on the current
 /// Tokio runtime (of any flavor), which [`BackgroundTasks::wait`] waits for. Without a runtime,
-/// or if the runtime drops that task before it ran, the process is killed instead.
+/// or if the runtime drops that task before it completed, the process is killed instead.
 #[derive(Debug)]
 pub(crate) struct ManagedProcessHandle {
     /// Present until dropped.
@@ -420,7 +427,7 @@ impl ManagedProcess {
             RunningState::Running => Ok(()),
             RunningState::Terminated(status) => Err(self.exited_during_startup(status)),
             RunningState::Uncertain(error) => {
-                tracing::debug!(process = self.handle.process().name, %error, "could not determine process state");
+                tracing::debug!(process = self.handle.process().name, %error, "Could not determine process state.");
                 Ok(())
             }
         }

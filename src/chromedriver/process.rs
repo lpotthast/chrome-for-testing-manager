@@ -108,7 +108,7 @@ impl ChromeDriverProcess {
         let requested_port = config.port();
         crate::check_cancelled(cancellation)?;
 
-        tracing::info!(path = %executable.display(), "launching chromedriver");
+        tracing::info!(path = %executable.display(), "Launching ChromeDriver.");
         let process = ManagedProcess::spawn(
             "chromedriver",
             ChromeForTestingArtifact::ChromeDriver,
@@ -942,6 +942,43 @@ mod tests {
         assert_that!(terminated_file.exists())
             .with_detail_message("the process must be killed, not terminated gracefully")
             .is_false();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_termination_is_handed_to_the_background_without_panicking()
+    -> Result<(), rootcause::Report> {
+        let directory = TestDirectory::new("chromedriver-interrupted-termination")?;
+        let pid_file = directory.path().join("pid");
+        let status_server = ready_status_server().await?;
+        let executable = FakeChromedriverBinaryBuilder::new()
+            .on_termination_delay(Duration::from_millis(500))
+            .record_pid(&pid_file)
+            .announce_port(status_server.port())
+            .idle_until_terminated()
+            .write(directory.path().join("fake-chromedriver"))
+            .await?;
+        let background = BackgroundTasks::default();
+        let process = launch_tracked(
+            default_request(executable, &directory).await?,
+            &test_status_client()?,
+            &test_lifecycle(),
+            &background,
+        )
+        .await?;
+
+        // Drops the termination future while it awaits the slow graceful exit, the way a runtime
+        // shutting down drops an in-flight background termination.
+        let interrupted =
+            tokio::time::timeout(Duration::from_millis(100), process.terminate()).await;
+        background.wait().await?;
+
+        assert_that!(interrupted.is_err()).is_true();
+        let pid = std::fs::read_to_string(&pid_file)?;
+        assert_that!(wait_until_gone(pid.trim()))
+            .with_detail_message("process remained alive after its termination was interrupted")
+            .is_true();
         Ok(())
     }
 

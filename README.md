@@ -43,7 +43,7 @@ and so that bumping the Chrome version under test is one simple change.
 
 ```toml
 [dependencies]
-chrome-for-testing-manager = "0.13"
+chrome-for-testing-manager = "0.14"
 rootcause = "0.13"
 thirtyfour = "0.37"
 
@@ -171,11 +171,42 @@ async fn run() -> Result<(), rootcause::Report<chrome_for_testing_manager::Chrom
 
 The `session()` builder used in the example requires the `thirtyfour` feature, which is enabled by default. If you
 only need version resolution, downloads, and process management, for example to drive the browser with another
-`WebDriver` client, disable the default features:
+`WebDriver` client, disable the default features and keep a TLS backend:
 
 ```toml
-chrome-for-testing-manager = { version = "0.13", default-features = false }
+chrome-for-testing-manager = { version = "0.14", default-features = false, features = ["rustls"] }
 ```
+
+## TLS backend
+
+The Chrome for Testing release index and its downloads are served over HTTPS, so one TLS backend feature must be
+enabled. They are forwarded to `reqwest`:
+
+- `rustls` *(default)*: `rustls` with the `aws-lc-rs` crypto provider.
+- `rustls-no-provider`: `rustls` with the process-default crypto provider, which you must install before launching.
+- `native-tls`: the platform's native TLS implementation.
+
+Without one, every request to the release index fails. Talking to `chromedriver` on localhost needs no TLS.
+
+To use the `ring` crypto provider instead of `aws-lc-rs`, select `rustls-no-provider` and install `ring` as the
+process-default provider. Every crate in your dependency graph must refrain from enabling `reqwest/rustls`, so also
+disable the default features of `thirtyfour` (which would enable it) if you depend on it directly:
+
+```toml
+[dev-dependencies]
+chrome-for-testing-manager = { version = "0.13", default-features = false, features = ["rustls-no-provider", "thirtyfour"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+thirtyfour = { version = "0.37", default-features = false, features = ["reqwest"] }
+```
+
+```rust
+// Once per process, before launching. Fails harmlessly if a provider is already installed.
+let _ = rustls::crypto::ring::default_provider().install_default();
+```
+
+Other `reqwest` features, such as `http2` or `system-proxy` are not enabled. Proxies configured
+through environment variables like `HTTPS_PROXY` are honored regardless. Enable further features
+on your own `reqwest` dependency if you need them.
 
 ## Going lower-level
 

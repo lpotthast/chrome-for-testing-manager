@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-10-08
+
+### Added
+
+- TLS backend features `rustls` (default, `aws-lc-rs` crypto provider), `rustls-no-provider` (process-default crypto
+  provider, e.g. `ring`), and `native-tls`, forwarded to `reqwest`. See the crate-level "TLS backend" docs.
+
+### Changed
+
+- Upgraded `chrome-for-testing` to 0.6.
+- All dependencies are declared with `default-features = false` and enable only the features this crate needs.
+  Builds with `default-features = false` must now enable a TLS backend feature, e.g. `features = ["rustls"]`.
+  Otherwise, requests to the Chrome for Testing release index fail.
+- `reqwest` no longer enables `http2`, `charset`, or `system-proxy` (macOS and Windows system proxy settings).
+  Proxies configured through environment variables are still honored. Enable these features on your own `reqwest`
+  dependency if you need them.
+- `thirtyfour` is built with only its `reqwest` feature. Its `cdp`, `component`, and `manager` features and its
+  `rustls` TLS backend are no longer enabled through this crate. Enable them on your own `thirtyfour` dependency if
+  you need them.
+
 ## [0.13.1] - 2026-10-06
 
 ### Added
@@ -517,7 +537,11 @@ flavor. Most public signatures changed. See "Changed" and "Removed" for migratio
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
-[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.13...HEAD
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.14...HEAD
+
+[0.14.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.13.1...v0.14.0
+
+[0.13.1]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.13.0...v0.13.1
 
 [0.13.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.12.0...v0.13.0
 

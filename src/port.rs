@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn try_from_u16_rejects_zero() {
-        assert_that!(Port::try_from(0u16).is_err()).is_true();
+        assert_that!(Port::try_from(0u16)).is_err();
         assert_that!(Port::try_from(8080u16).ok()).is_equal_to(Some(Port::new(8080)));
         assert_that!(u16::from(Port::new(8080))).is_equal_to(8080);
     }

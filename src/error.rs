@@ -652,11 +652,9 @@ mod tests {
             })),
         );
         let error = result.expect_err("operation and cleanup both failed");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         assert_that!(error.children().into_iter().count()).is_equal_to(1);
     }
 }

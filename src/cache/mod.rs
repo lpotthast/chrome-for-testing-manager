@@ -373,11 +373,9 @@ mod tests {
         let result = cache.prune(&[retained]).await?;
 
         assert_that!(result.removed_versions()).contains_exactly([removed]);
-        assert_that!(tokio::fs::try_exists(cache.path().join(retained.to_string())).await?)
-            .is_true();
-        assert_that!(tokio::fs::try_exists(cache.path().join(removed.to_string())).await?)
-            .is_false();
-        assert_that!(tokio::fs::try_exists(cache.path().join("owner-note")).await?).is_true();
+        assert_that!(cache.path().join(retained.to_string())).exists();
+        assert_that!(cache.path().join(removed.to_string())).does_not_exist();
+        assert_that!(cache.path().join("owner-note")).exists();
         Ok(())
     }
 
@@ -398,10 +396,10 @@ mod tests {
 
         cache.clear().await?;
 
-        assert_that!(tokio::fs::try_exists(&version_dir).await?).is_false();
-        assert_that!(tokio::fs::try_exists(cache.path().join(".trash.1.0")).await?).is_false();
-        assert_that!(tokio::fs::try_exists(&lock).await?).is_false();
-        assert_that!(tokio::fs::try_exists(cache.path().join("owner-note")).await?).is_true();
+        assert_that!(version_dir).does_not_exist();
+        assert_that!(cache.path().join(".trash.1.0")).does_not_exist();
+        assert_that!(lock).does_not_exist();
+        assert_that!(cache.path().join("owner-note")).exists();
         Ok(())
     }
 
@@ -418,11 +416,10 @@ mod tests {
 
         cache.clear().await?;
 
-        assert_that!(cache.path().starts_with(cache.root())).is_true();
+        assert_that!(cache.path()).starts_with(cache.root());
         assert_that!(cache.path()).is_not_equal_to(cache.root());
-        assert_that!(tokio::fs::try_exists(cache.path().join(version.to_string())).await?)
-            .is_false();
-        assert_that!(tokio::fs::try_exists(&legacy_package).await?).is_true();
+        assert_that!(cache.path().join(version.to_string())).does_not_exist();
+        assert_that!(legacy_package).exists();
         Ok(())
     }
 
@@ -448,9 +445,8 @@ mod tests {
 
         // A privileged user can remove the stuck entry; the others must be removed either way.
         assert_that!(result.is_err()).is_equal_to(stuck_remains);
-        assert_that!(tokio::fs::try_exists(directory.path().join(".trash.other")).await?)
-            .is_false();
-        assert_that!(tokio::fs::try_exists(directory.path().join("kept")).await?).is_true();
+        assert_that!(directory.path().join(".trash.other")).does_not_exist();
+        assert_that!(directory.path().join("kept")).exists();
         Ok(())
     }
 
@@ -465,11 +461,9 @@ mod tests {
             .prune(&[])
             .await
             .expect_err("shared lease must exclude cache mutation");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::CacheInUse { .. }
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::CacheInUse { .. }));
 
         drop(lease);
         assert_that!(cache.prune(&[]).await?.is_empty()).is_true();

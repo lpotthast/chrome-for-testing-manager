@@ -215,11 +215,9 @@ mod tests {
             false,
         );
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::DetermineCacheDir
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::DetermineCacheDir));
         assert_that!(format!("{error:?}")).contains("RemoveStaleArtifact");
     }
 
@@ -233,11 +231,9 @@ mod tests {
             false,
         );
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::DetermineCacheDir
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::DetermineCacheDir));
         assert_that!(error.children().into_iter().count()).is_equal_to(0);
     }
 
@@ -251,11 +247,9 @@ mod tests {
             true,
         );
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         assert_that!(error.children().into_iter().count()).is_equal_to(1);
     }
 }

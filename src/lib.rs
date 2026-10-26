@@ -33,12 +33,12 @@
 //!
 //! ```toml
 //! [dependencies]
-//! chrome-for-testing-manager = "0.14"
+//! chrome-for-testing-manager = "0.15"
 //! rootcause = "0.13"
-//! thirtyfour = "0.37"
+//! thirtyfour = "0.38"
 //!
 //! # Additional dependencies for the example below.
-//! assertr = "0.7"
+//! assertr = "0.9"
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //!
@@ -168,7 +168,7 @@
 //! `WebDriver` client, disable the default features and keep a TLS backend:
 //!
 //! ```toml
-//! chrome-for-testing-manager = { version = "0.14", default-features = false, features = ["rustls"] }
+//! chrome-for-testing-manager = { version = "0.15", default-features = false, features = ["rustls"] }
 //! ```
 //!
 //! # TLS backend
@@ -188,9 +188,9 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! chrome-for-testing-manager = { version = "0.13", default-features = false, features = ["rustls-no-provider", "thirtyfour"] }
+//! chrome-for-testing-manager = { version = "0.15", default-features = false, features = ["rustls-no-provider", "thirtyfour"] }
 //! rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-//! thirtyfour = { version = "0.37", default-features = false, features = ["reqwest"] }
+//! thirtyfour = { version = "0.38", default-features = false, features = ["reqwest"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -344,10 +344,8 @@ mod tests {
     fn missing_runtime_is_reported_as_a_typed_error() {
         let error =
             super::ensure_runtime().expect_err("a thread without a Tokio runtime must be rejected");
-        assert_that!(matches!(
-            error.current_context(),
-            super::ChromeForTestingError::MissingRuntime
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(super::ChromeForTestingError::MissingRuntime));
     }
 }

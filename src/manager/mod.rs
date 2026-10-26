@@ -429,20 +429,20 @@ mod tests {
         let directory = TestDirectory::new("missing-runtime")?;
         let manager = test_manager(&directory, Duration::from_secs(5))?;
 
-        let is_missing_runtime = |error: Report<ChromeForTestingError>| {
-            matches!(
-                error.current_context(),
-                ChromeForTestingError::MissingRuntime
-            )
-        };
         let resolved = futures::executor::block_on(manager.resolve_version(
             VersionRequest::Latest,
             BrowserArtifactRequest::Chrome,
             CancellationToken::new(),
         ));
-        assert_that!(resolved.is_err_and(is_missing_runtime)).is_true();
+        assert_that!(resolved)
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::MissingRuntime));
         let cleared = futures::executor::block_on(manager.clear_cache());
-        assert_that!(cleared.is_err_and(is_missing_runtime)).is_true();
+        assert_that!(cleared)
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::MissingRuntime));
         Ok(())
     }
 
@@ -461,11 +461,9 @@ mod tests {
             .await
             .expect_err("a pre-cancelled download must fail");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         assert_that!(files_beneath(directory.path())).is_equal_to(files_before);
         Ok(())
     }
@@ -511,13 +509,11 @@ mod tests {
             ),
             cancel_after_request,
         );
-        assert_that!(matches!(
-            result
-                .expect_err("manifest fetch must be cancelled")
-                .current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(result)
+            .with_detail_message("manifest fetch must be cancelled")
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         Ok(())
     }
 
@@ -597,13 +593,11 @@ mod tests {
             manager.download(&selected, cancellation.clone()),
             cancel_after_request,
         );
-        assert_that!(matches!(
-            result
-                .expect_err("transfer must be cancelled")
-                .current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(result)
+            .with_detail_message("transfer must be cancelled")
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         assert_that!(contains_transaction_residue(directory.path()).await?).is_false();
         Ok(())
     }
@@ -630,13 +624,11 @@ mod tests {
             manager.download(&selected, cancellation.clone()),
             cancel_after_partial_extraction,
         );
-        assert_that!(matches!(
-            result
-                .expect_err("in-flight extraction must be cancelled")
-                .current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(result)
+            .with_detail_message("in-flight extraction must be cancelled")
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         assert_that!(contains_transaction_residue(directory.path()).await?).is_false();
         Ok(())
     }
@@ -660,11 +652,9 @@ mod tests {
             .download(&selected, CancellationToken::new())
             .await
             .expect_err("truncated ZIP must fail");
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::InvalidZip { .. } | ChromeForTestingError::ExtractZip { .. }
-        ))
-        .is_true();
+        ));
         assert_that!(contains_transaction_residue(directory.path()).await?).is_false();
         Ok(())
     }
@@ -697,11 +687,9 @@ mod tests {
             .clear_cache()
             .await
             .expect_err("loaded packages keep a shared cache lease");
-        assert_that!(matches!(
-            clear_error.current_context(),
-            ChromeForTestingError::CacheInUse { .. }
-        ))
-        .is_true();
+        assert_that!(clear_error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::CacheInUse { .. }));
         drop(packages_a);
         drop(packages_b);
         manager_a.clear_cache().await?;
@@ -827,11 +815,9 @@ mod tests {
         let error = manager
             .prepare_caps(&loaded)
             .expect_err("non-Unicode path must return a typed error");
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::PrepareChromeCapabilities { .. }
-        ))
-        .is_true();
+        ));
         Ok(())
     }
 

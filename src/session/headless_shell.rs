@@ -249,12 +249,10 @@ mod tests {
         let mut caps = thirtyfour::ChromeCapabilities::new();
         caps.add_arg("remote-debugging-pipe")?;
         let error = launch_args(&caps).expect_err("a dashless pipe switch must be rejected too");
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::InvalidHeadlessShellRemoteDebuggingArg { arg }
                 if arg == "--remote-debugging-pipe"
-        ))
-        .is_true();
+        ));
         Ok(())
     }
 
@@ -266,12 +264,10 @@ mod tests {
 
         let error = launch_args(&caps)
             .expect_err("ChromeDriver cannot apply binary after the shell is already running");
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::UnsupportedHeadlessShellCapability { option }
                 if option == "binary"
-        ))
-        .is_true();
+        ));
         Ok(())
     }
 }

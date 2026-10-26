@@ -1,6 +1,6 @@
 [package]
 name = "chrome-for-testing-manager"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.89.0"
 repository = "https://github.com/lpotthast/chrome-for-testing-manager"
@@ -12,7 +12,15 @@ keywords = ["chrome", "chromedriver", "webdriver", "selenium", "browser-testing"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
-exclude = [".cargo-rdme.toml", ".claude", ".idea", ".vscode", "AGENTS.md", "CLAUDE.md", "Justfile"]
+exclude = [
+    ".cargo-rdme.toml",
+    ".claude",
+    ".idea",
+    ".vscode",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Justfile",
+]
 
 [features]
 default = ["rustls", "thirtyfour"]
@@ -25,13 +33,13 @@ native-tls = ["reqwest/native-tls"]
 thirtyfour = ["dep:futures", "dep:thirtyfour"]
 
 [dependencies]
-chrome-for-testing = { version = "0.6.0", default-features = false }
+chrome-for-testing = { version = "0.6.1", default-features = false }
 directories = { version = "6.0.0", default-features = false }
 futures = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
 reqwest = { version = "0.13.2", default-features = false }
 rootcause = { version = "0.13.0", default-features = false }
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
-thirtyfour = { version = "0.37.0", default-features = false, features = ["reqwest"], optional = true }
+thirtyfour = { version = "0.38.1", default-features = false, features = ["reqwest"], optional = true }
 thiserror = { version = "2.0.17", default-features = false, features = ["std"] }
 tokio = { version = "1.48.0", default-features = false, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-process-tools = { version = "0.11.3", default-features = false }
@@ -39,10 +47,10 @@ tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
 tracing = { version = "0.1.41", default-features = false, features = ["attributes", "std"] }
 typed-builder = { version = "0.23.2", default-features = false }
 unwrap-infallible = { version = "1.0.0", default-features = false }
-zip = { version = "8.0.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-assertr = { version = "0.7.1", default-features = false, features = ["std"] }
+assertr = { version = "0.9.1", default-features = false, features = ["rootcause", "std"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 futures = { version = "0.3.0", default-features = false, features = ["executor", "std"] }
 tokio = { version = "1.52.3", default-features = false, features = ["io-util", "net", "rt-multi-thread", "sync"] }

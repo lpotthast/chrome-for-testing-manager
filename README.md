@@ -43,12 +43,12 @@ and so that bumping the Chrome version under test is one simple change.
 
 ```toml
 [dependencies]
-chrome-for-testing-manager = "0.14"
+chrome-for-testing-manager = "0.15"
 rootcause = "0.13"
-thirtyfour = "0.37"
+thirtyfour = "0.38"
 
 # Additional dependencies for the example below.
-assertr = "0.7"
+assertr = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -174,7 +174,7 @@ only need version resolution, downloads, and process management, for example to 
 `WebDriver` client, disable the default features and keep a TLS backend:
 
 ```toml
-chrome-for-testing-manager = { version = "0.14", default-features = false, features = ["rustls"] }
+chrome-for-testing-manager = { version = "0.15", default-features = false, features = ["rustls"] }
 ```
 
 ## TLS backend
@@ -194,9 +194,9 @@ disable the default features of `thirtyfour` (which would enable it) if you depe
 
 ```toml
 [dev-dependencies]
-chrome-for-testing-manager = { version = "0.13", default-features = false, features = ["rustls-no-provider", "thirtyfour"] }
+chrome-for-testing-manager = { version = "0.15", default-features = false, features = ["rustls-no-provider", "thirtyfour"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-thirtyfour = { version = "0.37", default-features = false, features = ["reqwest"] }
+thirtyfour = { version = "0.38", default-features = false, features = ["reqwest"] }
 ```
 
 ```rust

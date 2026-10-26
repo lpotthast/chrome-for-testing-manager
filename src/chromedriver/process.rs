@@ -380,11 +380,9 @@ mod tests {
         )
         .await
         .expect_err("a process that exits before startup must fail");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::ExitedDuringStartup { status, .. } if status.success()
-        ))
-        .is_true();
+        assert_that!(error).current_context().is_matching(
+            pattern!(ChromeForTestingError::ExitedDuringStartup { status, .. } if status.success()),
+        );
         Ok(())
     }
 
@@ -419,11 +417,11 @@ mod tests {
         while let Ok(line) = subscription.recv().await {
             lines.push(line.line);
         }
-        assert_that!(lines.iter().any(|line| line == "shutdown-complete"))
+        assert_that!(lines)
             .with_detail_message(
                 "the subscription must receive output emitted during graceful termination",
             )
-            .is_true();
+            .contains("shutdown-complete");
         Ok(())
     }
 
@@ -459,9 +457,9 @@ mod tests {
             .into_iter()
             .map(|line| line.line)
             .collect::<Vec<_>>();
-        assert_that!(history.iter().any(|line| line == "crlf-terminated"))
+        assert_that!(history)
             .with_detail_message("a `\\r\\n` terminator must be stripped completely")
-            .is_true();
+            .contains("crlf-terminated");
         let mut subscribed = Vec::new();
         while let Ok(line) = subscription.recv().await {
             subscribed.push(line.line);
@@ -500,15 +498,11 @@ mod tests {
         )
         .await?;
         assert_that!(process.port().as_u16()).is_equal_to(status_server.port());
-        assert_that!(matches!(
-            cache
-                .clear()
-                .await
-                .expect_err("running process must retain the package cache lease")
-                .current_context(),
-            ChromeForTestingError::CacheInUse { .. }
-        ))
-        .is_true();
+        assert_that!(cache.clear().await)
+            .with_detail_message("running process must retain the package cache lease")
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::CacheInUse { .. }));
 
         process.terminate().await?;
         cache.clear().await?;
@@ -547,14 +541,12 @@ mod tests {
         .await
         .expect_err("a status endpoint that stalls its body must not count as ready");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::ChromeDriverNotReady { .. }
-        ))
-        .is_true();
-        assert_that!(started.elapsed() < startup_timeout + Duration::from_secs(5))
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::ChromeDriverNotReady { .. }));
+        assert_that!(started.elapsed())
             .with_detail_message("the stalled body read must be bounded by the startup deadline")
-            .is_true();
+            .is_less_than(startup_timeout + Duration::from_secs(5));
         Ok(())
     }
 
@@ -585,11 +577,9 @@ mod tests {
         .await
         .expect_err("the spawned process must report startup itself");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::WaitForStartup { .. }
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::WaitForStartup { .. }));
         Ok(())
     }
 
@@ -683,14 +673,12 @@ mod tests {
         .await
         .expect_err("a port that stays unavailable must fail startup");
 
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::ChromeDriverPortUnavailable {
                 requested: PortRequest::Any,
                 ..
             }
-        ))
-        .is_true();
+        ));
         assert_that!(read_runs(&counter).await?).is_equal_to(super::PORT_UNAVAILABLE_ATTEMPTS);
         assert_that!(format!("{error:?}"))
             .contains("[stdout] IPv4 port not available. Exiting...")
@@ -725,14 +713,12 @@ mod tests {
         .await
         .expect_err("an unavailable fixed port must fail startup");
 
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::ChromeDriverPortUnavailable {
                 requested: PortRequest::Specific(port),
                 ..
             } if *port == requested
-        ))
-        .is_true();
+        ));
         assert_that!(read_runs(&counter).await?).is_equal_to(1);
         Ok(())
     }
@@ -778,11 +764,9 @@ mod tests {
             cancel_after_start,
         );
         let error = result.expect_err("startup must be cancelled");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         let pid = tokio::fs::read_to_string(&pid_file).await?;
         let output = Command::new("kill")
             .arg("-0")
@@ -879,14 +863,13 @@ mod tests {
         .await
         .expect_err("an unparsable port must fail startup");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::UnrecognizedStartupOutput { line, .. } if line.contains("port soon")
-        ))
-        .is_true();
-        assert_that!(started.elapsed() < Duration::from_secs(10))
+        assert_that!(error).current_context().is_matching(pattern!(
+            ChromeForTestingError::UnrecognizedStartupOutput { line, .. }
+                if line.contains("port soon")
+        ));
+        assert_that!(started.elapsed())
             .with_detail_message("startup must not wait for its deadline")
-            .is_true();
+            .is_less_than(Duration::from_secs(10));
         assert_that!(format!("{error:?}")).contains("[stdout] warming up");
         Ok(())
     }
@@ -949,11 +932,9 @@ mod tests {
         .await
         .expect_err("a driver that never reports readiness must fail startup");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::ChromeDriverNotReady { .. }
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::ChromeDriverNotReady { .. }));
         assert_that!(format!("{error:?}")).contains("still warming up");
         Ok(())
     }
@@ -983,7 +964,7 @@ mod tests {
         drop(process);
         background.wait().await?;
 
-        assert_that!(terminated_file.exists()).is_true();
+        assert_that!(terminated_file).exists();
         Ok(())
     }
 
@@ -1014,12 +995,11 @@ mod tests {
         background.wait().await?;
         let cleared_after_termination = cache.clear().await;
 
-        assert_that!(cleared_while_terminating.is_err_and(|error| matches!(
-            error.current_context(),
-            ChromeForTestingError::CacheInUse { .. }
-        )))
-        .is_true();
-        assert_that!(cleared_after_termination.is_ok()).is_true();
+        assert_that!(cleared_while_terminating)
+            .err()
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::CacheInUse { .. }));
+        assert_that!(cleared_after_termination).is_ok();
         Ok(())
     }
 
@@ -1058,9 +1038,9 @@ mod tests {
         assert_that!(wait_until_gone(pid.trim()))
             .with_detail_message("dropped process remained alive")
             .is_true();
-        assert_that!(terminated_file.exists())
+        assert_that!(terminated_file)
             .with_detail_message("the process must be killed, not terminated gracefully")
-            .is_false();
+            .does_not_exist();
         Ok(())
     }
 
@@ -1101,9 +1081,9 @@ mod tests {
         assert_that!(wait_until_gone(pid.trim()))
             .with_detail_message("dropped process remained alive")
             .is_true();
-        assert_that!(terminated_file.exists())
+        assert_that!(terminated_file)
             .with_detail_message("the process must be killed, not terminated gracefully")
-            .is_false();
+            .does_not_exist();
         Ok(())
     }
 
@@ -1136,7 +1116,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(100), process.terminate()).await;
         background.wait().await?;
 
-        assert_that!(interrupted.is_err()).is_true();
+        assert_that!(interrupted).is_err();
         let pid = std::fs::read_to_string(&pid_file)?;
         assert_that!(wait_until_gone(pid.trim()))
             .with_detail_message("process remained alive after its termination was interrupted")
@@ -1169,11 +1149,10 @@ mod tests {
         .await
         .expect_err("a process that exits before startup must fail");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::ExitedDuringStartup { status, .. } if status.code() == Some(3)
-        ))
-        .is_true();
+        assert_that!(error).current_context().is_matching(pattern!(
+            ChromeForTestingError::ExitedDuringStartup { status, .. }
+                if status.code() == Some(3)
+        ));
         Ok(())
     }
 

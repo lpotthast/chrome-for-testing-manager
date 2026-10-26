@@ -430,8 +430,8 @@ mod tests {
 
         ArtifactStore::remove_leftovers(&chrome).await;
 
-        assert_that!(tokio::fs::try_exists(&chrome_staging).await?).is_false();
-        assert_that!(tokio::fs::try_exists(&headless_staging).await?).is_true();
+        assert_that!(chrome_staging).does_not_exist();
+        assert_that!(headless_staging).exists();
         Ok(())
     }
 

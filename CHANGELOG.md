@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] - 2026-10-26
+
+### Changed
+
+- **Breaking:** Upgrade `thirtyfour` to 0.38.1.
+- Upgrade `zip` to 9.1.2.
+- Upgrade `assertr` to 0.9.1.
+
 ## [0.14.0] - 2026-10-08
 
 ### Added
@@ -97,42 +105,43 @@ flavor. Most public signatures changed. See "Changed" and "Removed" for migratio
 - Safety limits for downloaded artifacts: archives larger than 2 GiB (`DownloadTooLarge`) or with more than 65,536
   entries (`ZipTooManyEntries`) are rejected.
 - Error variants for failures that previously panicked or that the new features introduce:
-  - `MissingRuntime`, returned instead of panicking when `ChromeForTesting::launch`, `SessionBuilder::run`, or a
-    `ChromeForTestingManager` operation is called outside a Tokio runtime, and `BuildHttpClient`, previously a panic in
-    `reqwest`.
-  - Cache: `CacheInUse`, `OpenLockFile`, `AcquireCacheLock`, `ReadCacheDir`, and `RemoveCacheEntry`.
-  - Installation: `ValidateInstalledPackage`, `CreateStagingDir`, `RemoveStaleArtifact`,
-    `InvalidPackageExecutablePath`, `MissingExtractedExecutable`, `WriteCompletionMarker`, and
-    `InstallCompletedPackage`.
-  - Version selection: `BrowserArtifactNotResolved` (from `download_for`) and `SelectedVersionPlatformMismatch`.
-  - Process startup: `ChromeDriverPortMismatch`, `ChromeDriverNotReady`, `ExitedDuringStartup`,
-    `UnrecognizedStartupOutput`, `StartupOutputClosed`, and `ReadStartupOutput`.
-  - Sessions: `UnsupportedHeadlessShellCapability` and `QuitSessionTimeout`.
+    - `MissingRuntime`, returned instead of panicking when `ChromeForTesting::launch`, `SessionBuilder::run`, or a
+      `ChromeForTestingManager` operation is called outside a Tokio runtime, and `BuildHttpClient`, previously a panic
+      in
+      `reqwest`.
+    - Cache: `CacheInUse`, `OpenLockFile`, `AcquireCacheLock`, `ReadCacheDir`, and `RemoveCacheEntry`.
+    - Installation: `ValidateInstalledPackage`, `CreateStagingDir`, `RemoveStaleArtifact`,
+      `InvalidPackageExecutablePath`, `MissingExtractedExecutable`, `WriteCompletionMarker`, and
+      `InstallCompletedPackage`.
+    - Version selection: `BrowserArtifactNotResolved` (from `download_for`) and `SelectedVersionPlatformMismatch`.
+    - Process startup: `ChromeDriverPortMismatch`, `ChromeDriverNotReady`, `ExitedDuringStartup`,
+      `UnrecognizedStartupOutput`, `StartupOutputClosed`, and `ReadStartupOutput`.
+    - Sessions: `UnsupportedHeadlessShellCapability` and `QuitSessionTimeout`.
 
 ### Changed
 
 - **Breaking:** Updated `chrome-for-testing` to 0.5.0. Its `Channel`, `Version`, and `Platform` types are re-exported,
   so their changes (including Linux ARM64 support) are part of this crate's API.
 - **Breaking:** Renamed `ChromeForTestingManagerError` to `ChromeForTestingError` and restructured its variants:
-  - Variants describing the same failure for different artifacts are merged into variants carrying a
-    `ChromeForTestingArtifact`: `SpawnProcess`, `WaitForStartup`, `TerminateProcess`, and `NoArtifactDownload`. The
-    ZIP errors `InvalidZip`, `ZipTooLarge`, and `ExtractZip` carry the artifact as well.
-  - Broader variants absorb narrower ones: `WriteDownloadFile` (which gained the file `path`) covers creating and
-    flushing the download file, `InvalidZip` covers opening the archive, `CreateCacheDir` covers platform directories,
-    `RemoveCacheEntry` replaces `RemoveCacheDir` and `RecreateCacheDir`, and `InvalidHeadlessShellRemoteDebuggingArg`
-    replaces both remote-debugging argument variants.
-  - Every variant except `Cancelled` and `MissingRuntime` is `#[non_exhaustive]`. Match struct variants with `..`, and
-    the unit variants `DetermineCacheDir`, `ConfigureSessionCapabilities`, `RunSessionCallback`, and `QuitSession` as
-    `Variant { .. }`.
-  - Changed fields: `UnsupportedPlatform` carries the detected `os` and `arch`, `NoMatchingVersion` the target
-    `platform` and the `requested_artifacts`, `TerminateProcess` the executable `path` instead of a port or `DevTools`
-    address, and `WaitForStartup` the startup `timeout`. `ZipTooLarge`'s `size` and `max_size` are `u64` instead of
-    `u128`.
-  - Errors from `chrome-for-testing` (manifest requests, platform detection) are kept as typed report children instead
-    of stringified attachments.
-  - Messages render version requests and artifact sets readably (e.g. `latest Stable`, `chrome and
+    - Variants describing the same failure for different artifacts are merged into variants carrying a
+      `ChromeForTestingArtifact`: `SpawnProcess`, `WaitForStartup`, `TerminateProcess`, and `NoArtifactDownload`. The
+      ZIP errors `InvalidZip`, `ZipTooLarge`, and `ExtractZip` carry the artifact as well.
+    - Broader variants absorb narrower ones: `WriteDownloadFile` (which gained the file `path`) covers creating and
+      flushing the download file, `InvalidZip` covers opening the archive, `CreateCacheDir` covers platform directories,
+      `RemoveCacheEntry` replaces `RemoveCacheDir` and `RecreateCacheDir`, and `InvalidHeadlessShellRemoteDebuggingArg`
+      replaces both remote-debugging argument variants.
+    - Every variant except `Cancelled` and `MissingRuntime` is `#[non_exhaustive]`. Match struct variants with `..`, and
+      the unit variants `DetermineCacheDir`, `ConfigureSessionCapabilities`, `RunSessionCallback`, and `QuitSession` as
+      `Variant { .. }`.
+    - Changed fields: `UnsupportedPlatform` carries the detected `os` and `arch`, `NoMatchingVersion` the target
+      `platform` and the `requested_artifacts`, `TerminateProcess` the executable `path` instead of a port or `DevTools`
+      address, and `WaitForStartup` the startup `timeout`. `ZipTooLarge`'s `size` and `max_size` are `u64` instead of
+      `u128`.
+    - Errors from `chrome-for-testing` (manifest requests, platform detection) are kept as typed report children instead
+      of stringified attachments.
+    - Messages render version requests and artifact sets readably (e.g. `latest Stable`, `chrome and
     chrome-headless-shell`) instead of in their `Debug` form, and `DetermineCacheDir` suggests configuring a cache
-    directory instead of asking whether `$HOME` is set.
+      directory instead of asking whether `$HOME` is set.
 - **Breaking:** `ChromeForTestingManager::launch_chromedriver(loaded, port, output_listener, shutdown)` is replaced by
   `launch_driver(&LoadedBrowserPackage, ChromeDriverConfig, CancellationToken)`, which returns a `ChromeDriverProcess`
   instead of a `(process, port, inspectors)` tuple. The port moves into `ChromeDriverConfig`, the graceful shutdown into
@@ -162,13 +171,13 @@ flavor. Most public signatures changed. See "Changed" and "Removed" for migratio
   including current-thread runtimes and plain `#[tokio::test]`. Previously, dropping blocked a runtime worker until the
   process was terminated and panicked without a multi-threaded runtime, and `Chromedriver::run` rejected current-thread
   runtimes.
-  - The process is terminated gracefully, with its configured `GracefulShutdown`, in a background task on the current
-    runtime. To wait for termination and observe its result, call `shutdown()` / `terminate()` instead of dropping, or
-    `ChromeForTestingManager::wait_for_background_tasks` for processes launched through a manager you hold.
-  - The process keeps its cache lease until it has exited or been killed, so `clear_cache` / `prune_cache` report
-    `CacheInUse` while a dropped process is still shutting down.
-  - A forceful kill of the process group is only the last resort, used when no runtime is left to drive graceful
-    termination (dropped outside a runtime, or the runtime shut down first). It is logged as a warning.
+    - The process is terminated gracefully, with its configured `GracefulShutdown`, in a background task on the current
+      runtime. To wait for termination and observe its result, call `shutdown()` / `terminate()` instead of dropping, or
+      `ChromeForTestingManager::wait_for_background_tasks` for processes launched through a manager you hold.
+    - The process keeps its cache lease until it has exited or been killed, so `clear_cache` / `prune_cache` report
+      `CacheInUse` while a dropped process is still shutting down.
+    - A forceful kill of the process group is only the last resort, used when no runtime is left to drive graceful
+      termination (dropped outside a runtime, or the runtime shut down first). It is logged as a warning.
 - If graceful termination fails, the process is killed once more. If that fails too, or the killed process does not
   exit within 5 s, the error is returned instead of retrying termination and panicking when the handle is dropped.
 - **Breaking:** Managed `WebDriver` sessions connect to `127.0.0.1` instead of `localhost`, through a no-proxy HTTP
@@ -537,7 +546,9 @@ flavor. Most public signatures changed. See "Changed" and "Removed" for migratio
 - Initial release.
 - Programmatic chromedriver management with local caching and random port spawning.
 
-[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.14...HEAD
+[Unreleased]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.15.0...HEAD
+
+[0.15.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.14.0...v0.15.0
 
 [0.14.0]: https://github.com/lpotthast/chrome-for-testing-manager/compare/v0.13.1...v0.14.0
 

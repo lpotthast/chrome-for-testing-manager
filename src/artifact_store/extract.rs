@@ -413,9 +413,9 @@ mod tests {
     #[cfg(unix)]
     fn assert_not_written(directory: &TestDirectory, escaped: &[&str]) {
         for escaped in escaped {
-            assert_that!(directory.path().join(escaped).exists())
+            assert_that!(directory.path().join(escaped))
                 .with_detail_message(format!("{escaped} must not be written"))
-                .is_false();
+                .does_not_exist();
         }
     }
 
@@ -456,11 +456,9 @@ mod tests {
         let error = extract_uncancelled(&directory, archive)
             .await
             .expect_err("published symlinks must not target discarded staging siblings");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::ExtractZip { .. }
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::ExtractZip { .. }));
         Ok(())
     }
 
@@ -551,11 +549,9 @@ mod tests {
         let error = extract_uncancelled(&directory, archive)
             .await
             .expect_err("archives beyond the entry-count limit must be rejected");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::ZipTooManyEntries { .. }
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::ZipTooManyEntries { .. }));
         Ok(())
     }
 
@@ -601,7 +597,7 @@ mod tests {
         cancellation.cancel();
 
         assert_that!(extract(&directory, many_entries_archive()?, cancellation).await).is_err();
-        assert_that!(unpacked_dir(&directory).exists()).is_false();
+        assert_that!(unpacked_dir(&directory)).does_not_exist();
         Ok(())
     }
 
@@ -621,11 +617,9 @@ mod tests {
             cancel_after_first_entry,
         );
         let error = result.expect_err("in-flight extraction must observe cancellation");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         let entries_after_return = fs::read_dir(&bundle)?.count();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_that!(fs::read_dir(&bundle)?.count())

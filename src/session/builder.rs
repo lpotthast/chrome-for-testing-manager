@@ -400,14 +400,12 @@ mod tests {
         .await
         .expect_err("an unanswered quit must fail cleanup at its deadline");
 
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::QuitSessionTimeout { .. }
-        ))
-        .is_true();
-        assert_that!(started.elapsed() < delete_delay / 2)
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::QuitSessionTimeout { .. }));
+        assert_that!(started.elapsed())
             .with_detail_message("cleanup must not wait for the unanswered quit")
-            .is_true();
+            .is_less_than(delete_delay / 2);
         // An abandoned handle is leaked, so `thirtyfour` does not retry the quit synchronously
         // when it is dropped.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -464,11 +462,9 @@ mod tests {
             cancel_during_connection,
         );
         let error = result.expect_err("connection cancellation must be reported");
-        assert_that!(matches!(
-            error.current_context(),
-            ChromeForTestingError::Cancelled
-        ))
-        .is_true();
+        assert_that!(error)
+            .current_context()
+            .is_matching(pattern!(ChromeForTestingError::Cancelled));
         assert_that!(
             server.hits("/session/fixture-session") + server.hits("/session/fixture-session/")
         )
@@ -559,14 +555,14 @@ mod tests {
             .session()
             .run(async |_session| -> Result<(), WebDriverError> { std::future::pending().await });
         let dropped = tokio::time::timeout(Duration::from_millis(200), run).await;
-        assert_that!(dropped.is_err()).is_true();
+        assert_that!(dropped).is_err();
 
         let started = Instant::now();
         chrome.shutdown().await?;
         assert_that!(quit_hits(&server)).is_equal_to(1);
-        assert_that!(started.elapsed() >= quit_delay / 2)
+        assert_that!(started.elapsed())
             .with_detail_message("shutdown must wait for the background quit to finish")
-            .is_true();
+            .is_greater_or_equal_to(quit_delay / 2);
         Ok(())
     }
 
@@ -585,17 +581,15 @@ mod tests {
             .session()
             .run(async |_session| -> Result<(), WebDriverError> { std::future::pending().await });
         let dropped = tokio::time::timeout(Duration::from_millis(200), run).await;
-        assert_that!(dropped.is_err()).is_true();
+        assert_that!(dropped).is_err();
 
         let error = chrome
             .shutdown()
             .await
             .expect_err("a failed background cleanup must be reported");
-        assert_that!(matches!(
-            error.current_context(),
+        assert_that!(error).current_context().is_matching(pattern!(
             ChromeForTestingError::BackgroundCleanup { failures: 1 }
-        ))
-        .is_true();
+        ));
         assert_that!(format!("{error:?}")).contains("QuitSession");
         Ok(())
     }

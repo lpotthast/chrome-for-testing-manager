@@ -23,11 +23,9 @@ async fn cancellation_before_launch_stops_before_setup() -> Result<(), Report> {
     )
     .await
     .expect_err("a pre-cancelled launch must fail");
-    assert_that!(matches!(
-        error.current_context(),
-        ChromeForTestingError::Cancelled
-    ))
-    .is_true();
+    assert_that!(error)
+        .current_context()
+        .is_matching(pattern!(ChromeForTestingError::Cancelled));
     Ok(())
 }
 
@@ -55,12 +53,10 @@ async fn interrupted_callbacks_still_close_webdriver_sessions() -> Result<(), Re
         })
         .await
         .expect_err("a cancelled callback must fail");
-    assert_that!(matches!(
-        error.current_context(),
-        ChromeForTestingError::Cancelled
-    ))
-    .with_detail_message(format!("unexpected error: {error:?}"))
-    .is_true();
+    assert_that!(error)
+        .with_detail_message(format!("unexpected error: {error:?}"))
+        .current_context()
+        .is_matching(pattern!(ChromeForTestingError::Cancelled));
     assert_session_closed(port, &cancelled_session_id, "cancelled").await?;
 
     let panicked_session_id = Arc::new(Mutex::new(None::<String>));
@@ -76,7 +72,7 @@ async fn interrupted_callbacks_still_close_webdriver_sessions() -> Result<(), Re
     ))
     .catch_unwind()
     .await;
-    assert_that!(panicked.is_err()).is_true();
+    assert_that!(panicked).is_err();
     assert_session_closed(port, &panicked_session_id, "panicked").await?;
 
     chrome.shutdown().await?;

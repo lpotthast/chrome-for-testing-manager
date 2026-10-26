@@ -20,7 +20,7 @@ msrv:
 
 # Lint the code.
 clippy:
-    cargo clippy --all --all-features -- -W clippy::pedantic
+    cargo clippy --all --all-features
 
 # Regenerate the README body from the crate-level docs in `src/lib.rs`.
 readme:
@@ -37,8 +37,8 @@ verify:
     cargo fmt --all -- --check
     cargo check --all-targets --all-features
     cargo check --lib --no-default-features
-    cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic
-    cargo clippy --all-targets --no-default-features -- -D warnings -W clippy::pedantic
+    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --all-targets --no-default-features -- -D warnings
     cargo test --all --all-features
     cargo test --doc --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features

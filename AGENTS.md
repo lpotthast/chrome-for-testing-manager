@@ -29,7 +29,7 @@ cache behavior when changing downloads or process lifecycles.
 - `cargo test --all --all-features`: run the complete test suite.
 - `cargo test <test_name> --all-features`: run one named test.
 - `cargo fmt --all`: format Rust sources.
-- `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`: run strict linting.
+- `cargo clippy --all-targets --all-features -- -D warnings`: run strict linting (`Cargo.toml` denies `all` and `pedantic`).
 - `cargo doc --no-deps --all-features`: build API documentation.
 - `just verify`: run the full non-mutating validation pipeline.
 - `just tidy`: update dependencies, sort manifests, and format files; expect maintained files to change.
